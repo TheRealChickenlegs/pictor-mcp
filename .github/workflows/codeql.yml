@@ -1,0 +1,57 @@
+name: CodeQL
+
+# Static analysis for security defects in the Python source: injection, path
+# handling, unsafe deserialisation, and the data-flow patterns behind them.
+#
+# Results appear under the repository's Security > Code scanning tab. Uploads
+# from pull requests are attributed to the PR, so a new finding is visible
+# before merge.
+#
+# Note: this complements, and does not replace, the confinement and limit tests
+# in the suite. CodeQL reasons about data flow; the tests assert behaviour.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  schedule:
+    # Weekly, so a newly published query can flag pre-existing code even when
+    # nothing has changed.
+    - cron: "17 4 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze Python
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    permissions:
+      contents: read
+      # Required to upload results to the code scanning API.
+      security-events: write
+      # Required only for workflows in private repositories.
+      actions: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python
+          # security-extended adds the lower-severity queries, which is the
+          # right trade for a server that reads untrusted files and URLs.
+          queries: security-extended
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:python"
