@@ -494,6 +494,26 @@ class TestProjectMetadata:
         for name, value in urls.items():
             assert "TheRealChickenlegs/pictor-mcp" in value, f"{name} -> {value}"
 
+    def test_the_ci_matrix_covers_the_image_runtime(self) -> None:
+        """The interpreter the container ships must be one the matrix tests.
+
+        These are separate declarations in separate files, and nothing kept them
+        in step: a Dependabot bump moved the base image from 3.12 to 3.14 and the
+        runtime the container actually uses became untested, while CI stayed
+        green. The same class of gap as a duplicated registry path.
+        """
+        match = re.search(r"^FROM python:(\d+\.\d+)-", DOCKERFILE.read_text(), re.MULTILINE)
+        assert match, "the base image does not pin a python version"
+        image_python = match.group(1)
+
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+        matrix = re.search(r"python-version: \[([^\]]+)\]", workflow)
+        assert matrix, "the CI workflow declares no python-version matrix"
+        listed = {value.strip().strip('"') for value in matrix.group(1).split(",")}
+        assert image_python in listed, (
+            f"the image ships Python {image_python}, which the CI matrix does not test: {sorted(listed)}"
+        )
+
     def test_the_ci_matrix_covers_the_declared_floor(self) -> None:
         """Keep requires-python and the CI matrix from disagreeing.
 
