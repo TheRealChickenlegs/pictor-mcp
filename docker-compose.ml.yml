@@ -26,7 +26,7 @@
 
 services:
   pictor-mcp:
-    image: ${IMAGE_REPO:-ghcr.io/therealcickenlegs/pictor-mcp}:${IMAGE_TAG_ML:-ml}
+    image: ${IMAGE_REPO:-ghcr.io/therealchickenlegs/pictor-mcp}:${IMAGE_TAG_ML:-ml}
 
     environment:
       PICTOR_GPU: ${PICTOR_GPU:-auto}

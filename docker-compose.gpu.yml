@@ -29,7 +29,7 @@ services:
   pictor-mcp:
     # The GPU image is published as :gpu and as :<version>-gpu. Pin the version
     # for a reproducible deployment: IMAGE_TAG_GPU=1.0.0-gpu
-    image: ${IMAGE_REPO:-ghcr.io/therealcickenlegs/pictor-mcp}:${IMAGE_TAG_GPU:-gpu}
+    image: ${IMAGE_REPO:-ghcr.io/therealchickenlegs/pictor-mcp}:${IMAGE_TAG_GPU:-gpu}
 
     environment:
       # auto  = use CUDA when torch can see a device, otherwise fall back to the

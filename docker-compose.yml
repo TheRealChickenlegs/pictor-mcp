@@ -15,7 +15,7 @@
 # Images are built and published by .github/workflows/publish.yml. Confirm the
 # tag you want exists before the first `up`:
 #
-#   docker pull ghcr.io/therealcickenlegs/pictor-mcp:latest
+#   docker pull ghcr.io/therealchickenlegs/pictor-mcp:latest
 #
 # If the repository is private the registry package is private too: either make
 # it public once under the repository's Packages tab, or run
@@ -274,7 +274,7 @@ x-pictor-volumes: &pictor-volumes
 
 services:
   pictor-mcp:
-    image: ${IMAGE_REPO:-ghcr.io/therealcickenlegs/pictor-mcp}:${IMAGE_TAG:-latest}
+    image: ${IMAGE_REPO:-ghcr.io/therealchickenlegs/pictor-mcp}:${IMAGE_TAG:-latest}
     container_name: pictor-mcp
 
     # -----------------------------------------------------------------------

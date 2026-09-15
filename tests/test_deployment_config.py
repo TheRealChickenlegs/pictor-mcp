@@ -46,9 +46,10 @@ DOCKERIGNORE = ROOT / ".dockerignore"
 
 SERVICE = "pictor-mcp"
 
-#: The registry path the publish workflow pushes to. Kept here so a change that
-#: is not reflected in both places fails the build.
-EXPECTED_IMAGE_REPO = "ghcr.io/therealcickenlegs/pictor-mcp"
+#: Fallback registry path, used only when the git remote cannot be read (a
+#: source tarball, for instance). The authority is the remote itself; see
+#: :func:`expected_image_repo`.
+FALLBACK_IMAGE_REPO = "ghcr.io/therealchickenlegs/pictor-mcp"
 
 _INTERPOLATION = re.compile(r"\$\{([A-Z0-9_]+)(?::-([^}]*))?\}")
 
@@ -119,6 +120,38 @@ def _env_example_assignments() -> dict[str, str]:
     return values
 
 
+def expected_image_repo() -> str:
+    """Derive the GHCR path from the git remote.
+
+    Deliberately not a constant. A hard-coded expectation is a second copy of the
+    same string, so a typo in the compose files can be mirrored in the assertion
+    and the test passes while every deployment pulls an image that does not
+    exist - which is exactly what happened here: the owner was spelled
+    "therealcickenlegs" in five files and in the expectation, so the check
+    agreed with the bug. The remote is the one thing that cannot be wrong about
+    where the images live.
+    """
+    import subprocess
+
+    try:
+        url = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):  # pragma: no cover - no git
+        return FALLBACK_IMAGE_REPO
+
+    match = re.search(r"github\.com[:/]([^/]+)/([^/\s]+?)(?:\.git)?$", url)
+    if not match:  # pragma: no cover - remote is not GitHub
+        return FALLBACK_IMAGE_REPO
+    # GHCR lower-cases the owner and repository when it namespaces a package.
+    return f"ghcr.io/{match.group(1).lower()}/{match.group(2).lower()}"
+
+
 def _pyproject() -> dict[str, Any]:
     """Parse pyproject.toml, working on 3.10 as well as 3.11+."""
     return tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
@@ -173,16 +206,32 @@ class TestComposeStructure:
         for path in (BASE_COMPOSE, GPU_OVERLAY, ML_OVERLAY):
             assert "build" not in _load(path)["services"][SERVICE], path.name
 
-    def test_default_image_path_matches_the_publish_workflow(self) -> None:
-        """The default registry path must be the one CI actually publishes to."""
-        reference = _load(BASE_COMPOSE)["services"][SERVICE]["image"]
-        assert reference.startswith("${IMAGE_REPO:-" + EXPECTED_IMAGE_REPO + "}"), reference
+    @pytest.mark.parametrize("path", [BASE_COMPOSE, GPU_OVERLAY, ML_OVERLAY], ids=lambda p: p.name)
+    def test_image_path_matches_the_git_remote(self, path: Path) -> None:
+        """The registry path must be the one the remote actually implies.
 
-        # The publish workflow names the registry and derives the repository
-        # from the checkout, so the two cannot disagree unless the registry
-        # itself changes.
+        Compared against the git remote rather than a constant, so a typo in the
+        owner or repository name cannot be mirrored in the expectation. Getting
+        this wrong means every deployment pulls a non-existent image, and the
+        failure surfaces on the operator's machine rather than in CI.
+        """
+        expected = expected_image_repo()
+        image = _load(path)["services"][SERVICE]["image"]
+        assert f"${{IMAGE_REPO:-{expected}}}" in image, f"{path.name}: {image}"
+
+    def test_the_registry_path_is_consistent_everywhere(self) -> None:
+        """Every file that repeats the path must agree with the remote."""
+        expected = expected_image_repo()
+        seen: set[str] = set()
+        for path in (*ALL_COMPOSE, ENV_EXAMPLE, ROOT / "README.md"):
+            seen.update(re.findall(r"ghcr\.io/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+", path.read_text()))
+        assert seen == {expected}, f"inconsistent registry paths: {sorted(seen)}"
+
+    def test_the_publish_workflow_pushes_to_the_same_registry(self) -> None:
+        """The workflow derives the repository from the checkout, not a literal."""
         workflow = (ROOT / ".github" / "workflows" / "publish.yml").read_text()
         assert "REGISTRY: ghcr.io" in workflow
+        assert "images: ${{ env.REGISTRY }}/${{ github.repository }}" in workflow
 
     @pytest.mark.parametrize(
         ("path", "tag_var", "tag_default"),

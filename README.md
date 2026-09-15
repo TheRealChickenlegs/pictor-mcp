@@ -83,7 +83,7 @@ docker compose up -d
 Verify it:
 
 ```bash
-docker pull ghcr.io/therealcickenlegs/pictor-mcp:latest   # confirm the tag exists
+docker pull ghcr.io/therealchickenlegs/pictor-mcp:latest   # confirm the tag exists
 curl -s http://127.0.0.1:8077/healthz                      # {"status":"ok"}
 docker compose logs -f pictor-mcp
 docker compose exec pictor-mcp python -m pictor_mcp --check # resolved config, secrets redacted
@@ -571,7 +571,7 @@ options:
 
 | Variable | Default | Notes |
 |---|---|---|
-| `IMAGE_REPO` | `ghcr.io/therealcickenlegs/pictor-mcp` | Registry path, no tag. |
+| `IMAGE_REPO` | `ghcr.io/therealchickenlegs/pictor-mcp` | Registry path, no tag. |
 | `IMAGE_TAG` | `latest` | CPU image tag. Pin e.g. `1.0.0`. |
 | `IMAGE_TAG_GPU` | `gpu` | CUDA image tag, e.g. `1.0.0-gpu`. |
 | `IMAGE_TAG_ML` | `ml` | ML image tag, e.g. `1.0.0-ml`. |
@@ -606,9 +606,9 @@ the default branch and every `v*` tag:
 
 | Tag | Contents | Platforms |
 |---|---|---|
-| `ghcr.io/therealcickenlegs/pictor-mcp:latest` | CPU, ~180 MB | `linux/amd64`, `linux/arm64` |
-| `ghcr.io/therealcickenlegs/pictor-mcp:gpu` | CPU + PyTorch CUDA wheels | `linux/amd64` |
-| `ghcr.io/therealcickenlegs/pictor-mcp:ml` | GPU + rembg + `onnxruntime-gpu`, u2net baked in | `linux/amd64` |
+| `ghcr.io/therealchickenlegs/pictor-mcp:latest` | CPU, ~180 MB | `linux/amd64`, `linux/arm64` |
+| `ghcr.io/therealchickenlegs/pictor-mcp:gpu` | CPU + PyTorch CUDA wheels | `linux/amd64` |
+| `ghcr.io/therealchickenlegs/pictor-mcp:ml` | GPU + rembg + `onnxruntime-gpu`, u2net baked in | `linux/amd64` |
 
 Version tags are added alongside (`1.0.0`, `1.0`, `1.0.0-gpu`, …), plus an
 immutable `sha-<short>` tag per commit. The CUDA images are amd64-only because
@@ -623,7 +623,7 @@ A published image reports the version baked into it, so you can always tell what
 you are running:
 
 ```bash
-docker run --rm ghcr.io/therealcickenlegs/pictor-mcp:latest python -m pictor_mcp --version
+docker run --rm ghcr.io/therealchickenlegs/pictor-mcp:latest python -m pictor_mcp --version
 ```
 
 ## Development
