@@ -199,12 +199,18 @@ metadata: they change the pixels, and stripping them would corrupt output.
 ### 8. Supply chain
 
 - `pyproject.toml` pins major versions (`mcp>=2.2,<3`, `pillow>=10.4`).
-- The GPU stage pins `TORCH_VERSION` as a build argument and installs torch from
-  the PyTorch CUDA index. `--extra-index-url` is what PyTorch documents, but it
-  does expose pip's dependency-confusion surface (pip considers both indexes and
-  takes the highest version). Pinning the version and building from a trusted
-  network is the mitigation; the CPU image — the default build target — never
-  touches the CUDA index.
+- The GPU stage installs torch with `--index-url`, not `--extra-index-url`.
+  PyTorch documents the latter, but it puts two indexes in play and pip then
+  takes the highest version across both, which is the dependency-confusion
+  opening. PyTorch's index mirrors torch's own dependencies (sympy, networkx,
+  filelock, jinja2, fsspec), so replacing PyPI entirely resolves cleanly and
+  leaves only one index to trust. The CPU image — the default build target —
+  never touches the CUDA index.
+- `TORCH_INDEX_URL` selects the CUDA build and `TORCH_VERSION` optionally pins
+  it; both are build arguments. The version is unpinned by default because a hard
+  pin goes stale against a moving base image: `torch==2.4.1` stopped resolving
+  the moment the base moved from Python 3.12 to 3.14, since the cu124 index
+  carries no cp314 wheels at all.
 - The build context is minimal (`.dockerignore`), so no secret, test fixture or
   host file can reach a layer.
 - The MCP SDK's own transport-security default is **DNS-rebinding protection

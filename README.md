@@ -430,7 +430,7 @@ and a driver visible to `nvidia-smi`. Sanity-check the host before blaming the
 image:
 
 ```bash
-docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi
+docker run --rm --gpus all nvidia/cuda:12.6.0-base-ubuntu22.04 nvidia-smi
 ```
 
 The GPU tags are `:gpu` and `:<version>-gpu`; the overlay selects them for you,

@@ -586,6 +586,51 @@ class TestDockerfile:
         for block in re.findall(r"RUN apt-get update(?:.|\n)*?(?=\n[A-Z]|\Z)", DOCKERFILE.read_text()):
             assert "rm -rf /var/lib/apt/lists/*" in block
 
+    def test_torch_comes_from_a_single_index(self) -> None:
+        """`--index-url`, never `--extra-index-url`.
+
+        PyTorch documents the extra-index form, but it puts PyPI and the CUDA
+        index in play together and pip then takes the highest version across
+        both - which is the dependency-confusion opening. PyTorch's index
+        mirrors torch's dependencies, so replacing PyPI outright resolves
+        cleanly and leaves only one index to trust.
+        """
+        gpu_stage = DOCKERFILE.read_text().split("FROM base AS gpu", 1)[1]
+        gpu_stage = gpu_stage.split("FROM gpu AS ml", 1)[0]
+        # Comments describe the approach that was rejected, so they have to be
+        # stripped before scanning or the explanation trips the check.
+        commands = "\n".join(line for line in gpu_stage.splitlines() if not line.lstrip().startswith("#"))
+        assert "--index-url" in commands
+        assert "--extra-index-url" not in commands
+
+    def test_torch_is_not_pinned_to_a_fixed_version(self) -> None:
+        """A hard pin plus a moving base image is a build that breaks later.
+
+        `torch==2.4.1` stopped resolving the moment the base image moved to
+        Python 3.14, because the index it named publishes no cp314 wheels. The
+        default must be "whatever the index has for this interpreter".
+        """
+        match = re.search(r"^ARG TORCH_VERSION=(.*)$", DOCKERFILE.read_text(), re.MULTILINE)
+        assert match, "TORCH_VERSION is no longer a build argument"
+        assert match.group(1).strip() == "", f"TORCH_VERSION defaults to {match.group(1)!r}"
+
+    def test_the_cuda_index_is_overridable(self) -> None:
+        """An older driver needs an older CUDA build, so it must be a build arg."""
+        match = re.search(r"^ARG TORCH_INDEX_URL=(\S+)$", DOCKERFILE.read_text(), re.MULTILINE)
+        assert match, "TORCH_INDEX_URL is no longer a build argument"
+        assert match.group(1).startswith("https://download.pytorch.org/whl/")
+
+    def test_no_comment_sits_inside_a_line_continuation(self) -> None:
+        """A comment inside a continuation is stripped by Docker, but it is a
+        documented gotcha and reads as if it were part of the command."""
+        lines = DOCKERFILE.read_text().splitlines()
+        offenders = [
+            (index + 1, lines[index + 1].strip()[:60])
+            for index, line in enumerate(lines[:-1])
+            if line.rstrip().endswith("\\") and lines[index + 1].lstrip().startswith("#")
+        ]
+        assert not offenders, f"comment inside a continuation at {offenders}"
+
     def test_oci_source_label_is_the_real_repository(self) -> None:
         assert "TheRealChickenlegs/pictor-mcp" in DOCKERFILE.read_text()
 

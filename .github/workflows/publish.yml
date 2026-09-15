@@ -79,8 +79,8 @@ jobs:
             suffix: "-gpu"
             alias: gpu
             # amd64 only. PyTorch does not publish linux/arm64 CUDA wheels for
-            # the cu124 index this stage installs from, so an arm64 leg would
-            # fail rather than produce a usable image.
+            # the CUDA index this stage installs from, so an arm64 leg would fail
+            # rather than produce a usable image.
             platforms: linux/amd64
           - name: ml (CUDA + background removal)
             target: ml

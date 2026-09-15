@@ -34,7 +34,10 @@ services:
       context: .
       # Change to `gpu` or `ml` when combining this with one of those overlays.
       target: default
-      # Uncomment to pass a specific PyTorch build to the gpu/ml stages.
+      # Override the CUDA build for the gpu/ml stages. Leave TORCH_VERSION empty
+      # (the default) to take the newest build the index publishes for the base
+      # image's Python; set it only to pin an exact version.
       # args:
-      #   TORCH_VERSION: "2.4.1"
+      #   TORCH_INDEX_URL: "https://download.pytorch.org/whl/cu126"
+      #   TORCH_VERSION: "2.14.0"
     image: pictor-mcp:local

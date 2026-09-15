@@ -42,10 +42,13 @@ LABEL org.opencontainers.image.title="pictor-mcp" \
       org.opencontainers.image.source="https://github.com/TheRealChickenlegs/pictor-mcp" \
       org.opencontainers.image.licenses="MIT"
 
+# PIP_ROOT_USER_ACTION silences pip's "running as root" advice: installing as
+# root during the build is intended, because the runtime user does not exist yet.
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    PIP_ROOT_USER_ACTION=ignore
 
 # Runtime shared libraries for the Pillow codecs this server uses:
 #   fonts-dejavu-core -> a real font for the text watermark tool (see
@@ -147,28 +150,53 @@ ENTRYPOINT ["python", "-m", "pictor_mcp"]
 # =============================================================================
 # gpu - CPU base plus PyTorch CUDA wheels.
 #
-# TORCH_VERSION is a build argument so an operator can pin an exact build for
-# reproducibility. Note that `--extra-index-url` is what PyTorch's own install
-# instructions use, but it does expose pip's dependency-confusion surface: pip
-# considers both PyPI and the CUDA index and takes the highest version, so a
-# package squatting the `torch` name on PyPI with a higher version would win.
-# Pinning the version (and building from a trusted network) is the mitigation;
-# hash-pinning is impractical while pyproject.toml uses version ranges.
+# The CUDA index and the base image's Python version are coupled, and that is the
+# trap this stage fell into: a Dependabot bump moved the base from python:3.12 to
+# python:3.14, and the pinned torch==2.4.1 then could not resolve, because the
+# cu124 index has no cp314 wheels at all (it stops at torch 2.6.0). A hard pin
+# plus a moving interpreter is a build that breaks on someone else's schedule.
+#
+# Two build arguments instead of one hard pin:
+#
+#   TORCH_INDEX_URL  which CUDA build to install. cu126 is the default because it
+#                    is the 12.x index carrying wheels for every interpreter the
+#                    base image might use, 3.14 included. Newer indexes are not
+#                    automatically better: an index only helps if the host driver
+#                    is new enough, and cu128/cu129 carry fewer torch versions.
+#   TORCH_VERSION    empty means "the newest build on that index for this
+#                    interpreter", which cannot go stale. Set it to pin exactly,
+#                    for a reproducible image.
+#
+# Check the pairing before changing either:
+#
+#   curl -s https://download.pytorch.org/whl/cu126/torch/ | grep -o 'cp3[0-9]*' | sort -u
+#
+# If your driver is too old for a 12.x CUDA build, pin an older index *and* a
+# base image whose Python that index still publishes wheels for.
+#
 # The CPU image - the default target - never touches the CUDA index.
 # =============================================================================
 FROM base AS gpu
 
-ARG TORCH_VERSION=2.4.1
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu126
+ARG TORCH_VERSION=
 
 # The base stage ends as the unprivileged `pictor` user; installation needs root.
 USER root
 
+# `--index-url` *replaces* PyPI rather than adding to it, and PyTorch's index
+# mirrors torch's own dependencies (sympy, networkx, filelock, jinja2, fsspec),
+# so this resolves completely. That is strictly better than the
+# `--extra-index-url` form PyTorch documents: with two indexes in play, pip takes
+# the highest version across both, which is the dependency-confusion opening.
+# Here there is only ever one index.
+# The second install is satisfied by the first and is kept so that adding a
+# dependency to the `gpu` extra in pyproject.toml cannot be silently ignored
+# here. It uses the default index, so it also cannot fail for lack of a wheel.
 RUN pip install --no-cache-dir \
-        --extra-index-url https://download.pytorch.org/whl/cu124 \
-        "torch==${TORCH_VERSION}" \
-    && pip install --no-cache-dir \
-        --extra-index-url https://download.pytorch.org/whl/cu124 \
-        ".[gpu]"
+        --index-url "${TORCH_INDEX_URL}" \
+        "torch${TORCH_VERSION:+==${TORCH_VERSION}}" \
+    && pip install --no-cache-dir ".[gpu]"
 
 ENV PICTOR_GPU=auto
 
