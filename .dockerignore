@@ -1,0 +1,47 @@
+# Keep the build context minimal and secret-free.
+#
+# Only `pyproject.toml` and `src/` are ever COPYed, but excluding everything
+# else still matters: it keeps the context small (faster builds over a slow
+# link) and makes it impossible for a stray secret, test fixture or host-local
+# file to be picked up by a future COPY or folded into a layer by accident.
+
+# --- VCS / tooling -----------------------------------------------------------
+.git
+.gitignore
+.github
+.ruff_cache
+.pytest_cache
+.mypy_cache
+.pyright
+
+# --- virtualenvs and bytecode ------------------------------------------------
+.venv
+venv
+env
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.python-version
+
+# --- local data and secrets --------------------------------------------------
+# .env holds real credentials; only .env.example is safe to share. The negation
+# keeps the example template in the context in case a future layer wants it.
+.env
+!.env.example
+input
+output
+.testdata
+
+# --- tests and docs ----------------------------------------------------------
+tests
+docs
+# Markdown is excluded, but README.md is needed at build time: pyproject.toml
+# declares `readme = "README.md"` and the Dockerfile COPYs it.
+*.md
+!README.md
+
+# --- OS noise ----------------------------------------------------------------
+.DS_Store
+Thumbs.db
+*.swp
