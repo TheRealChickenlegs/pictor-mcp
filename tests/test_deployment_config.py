@@ -238,6 +238,30 @@ class TestComposeStructure:
             seen.update(re.findall(r"ghcr\.io/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+", path.read_text()))
         assert seen == {expected}, f"inconsistent registry paths: {sorted(seen)}"
 
+    @pytest.mark.parametrize("path", sorted((ROOT / ".github" / "workflows").glob("*.yml")), ids=lambda p: p.name)
+    def test_image_references_built_in_shell_are_lowercased(self, path: Path) -> None:
+        """GHCR rejects any uppercase character in a repository path.
+
+        `github.repository` keeps the owner's capitalisation
+        (`TheRealChickenlegs/pictor-mcp`), and `docker/metadata-action` lowercases
+        the images it generates, so the push succeeds. A reference assembled by
+        hand in a `run:` step does not, and fails with "repository name must be
+        lowercase" - which is exactly how the verify job broke.
+        """
+        document = yaml.safe_load(path.read_text())
+        for job in (document.get("jobs") or {}).values():
+            for step in job.get("steps") or []:
+                script = step.get("run")
+                if not script or "GITHUB_REPOSITORY" not in script:
+                    continue
+                active = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
+                lowercased = "tr '[:upper:]' '[:lower:]'" in active or "${GITHUB_REPOSITORY,,}" in active
+                assert lowercased, f"{path.name}: {step.get('name')!r} uses GITHUB_REPOSITORY without lowercasing it"
+                # And the reference must be built from the lowercased copy.
+                assert "${REGISTRY}/${GITHUB_REPOSITORY}" not in active, (
+                    f"{path.name}: {step.get('name')!r} builds an image reference from the raw name"
+                )
+
     def test_the_publish_workflow_pushes_to_the_same_registry(self) -> None:
         """The workflow derives the repository from the checkout, not a literal."""
         workflow = (ROOT / ".github" / "workflows" / "publish.yml").read_text()

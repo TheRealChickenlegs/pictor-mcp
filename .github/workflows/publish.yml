@@ -111,6 +111,9 @@ jobs:
         id: meta
         uses: docker/metadata-action@v6
         with:
+          # metadata-action lowercases this itself, which is why the push
+          # succeeds even though github.repository carries the owner's
+          # capitalisation. Any hand-built reference must lowercase too.
           images: ${{ env.REGISTRY }}/${{ github.repository }}
           # Per-tag `suffix` is used rather than the global `flavor.suffix`, so
           # the short aliases (`gpu`, `ml`) stay clean instead of becoming
@@ -181,9 +184,14 @@ jobs:
         # runner has no GPU, so pulling them would cost time and prove little.
         run: |
           set -euo pipefail
+          # GHCR requires a lowercase repository path, and github.repository keeps
+          # the owner's capitalisation. docker/metadata-action lowercases the
+          # images it generates, so the push works; a hand-built reference does
+          # not, and fails with "repository name must be lowercase".
+          namespace="$(echo "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
           sha="sha-$(git rev-parse --short HEAD)"
           for tag in "${sha}-gpu" "${sha}-ml"; do
-            image="${REGISTRY}/${GITHUB_REPOSITORY}:${tag}"
+            image="${REGISTRY}/${namespace}:${tag}"
             echo "--- ${image}"
             docker buildx imagetools inspect "${image}" >/dev/null
             docker buildx imagetools inspect "${image}" | grep -q 'linux/amd64'
@@ -199,7 +207,8 @@ jobs:
         # the one an operator gets when they pin their real address.
         run: |
           set -euo pipefail
-          IMAGE="${REGISTRY}/${GITHUB_REPOSITORY}:sha-$(git rev-parse --short HEAD)"
+          namespace="$(echo "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
+          IMAGE="${REGISTRY}/${namespace}:sha-$(git rev-parse --short HEAD)"
           echo "pulling ${IMAGE}"
           docker pull "${IMAGE}"
 
