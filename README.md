@@ -8,9 +8,9 @@ crop, rotate, watermark, background-remove and batch-process images — and veri
 its own edits afterwards.
 
 ```bash
-mkdir -p input output && chown 10001:10001 output
+mkdir -p input output && sudo chown 10001:10001 output
 cp .env.example .env            # set PICTOR_AUTH_TOKEN
-docker compose up -d --build
+docker compose up -d            # pulls the published image; nothing is built
 ```
 
 The server is then at `http://127.0.0.1:8077/mcp`.
@@ -33,6 +33,7 @@ The server is then at `http://127.0.0.1:8077/mcp`.
 - [Security](#security)
 - [Configuration](#configuration)
 - [Running without Docker](#running-without-docker)
+- [Container images](#container-images)
 - [Development](#development)
 
 ---
@@ -64,20 +65,25 @@ an agent does not pay a round trip and a base64 transfer per step.
 
 ## Quick start
 
+The compose files pull a prebuilt image from GHCR, so there is nothing to
+compile:
+
 ```bash
-git clone <this repo> pictor-mcp && cd pictor-mcp
+git clone https://github.com/TheRealChickenlegs/pictor-mcp.git
+cd pictor-mcp
 
 mkdir -p input output
-chown 10001:10001 output        # the container runs as uid 10001
+sudo chown 10001:10001 output   # the container runs as uid 10001
 cp .env.example .env
 openssl rand -hex 32            # paste into PICTOR_AUTH_TOKEN in .env
 
-docker compose up -d --build
+docker compose up -d
 ```
 
-Check it:
+Verify it:
 
 ```bash
+docker pull ghcr.io/therealcickenlegs/pictor-mcp:latest   # confirm the tag exists
 curl -s http://127.0.0.1:8077/healthz                      # {"status":"ok"}
 docker compose logs -f pictor-mcp
 docker compose exec pictor-mcp python -m pictor_mcp --check # resolved config, secrets redacted
@@ -88,6 +94,42 @@ Put images in `./input`, and the server writes results to `./output`.
 The default port mapping is `127.0.0.1:8077:8077`, so **nothing off-host can
 reach it**. To expose it on your LAN, see
 [Exposing beyond localhost](#exposing-beyond-localhost).
+
+### Which compose file
+
+| File | What it does |
+|---|---|
+| `docker-compose.yml` | CPU image. The default; `docker compose up -d`. |
+| `docker-compose.gpu.yml` | Overlay: switches to the CUDA image and passes the GPU through. |
+| `docker-compose.ml.yml` | Overlay: the ML image (CUDA + background removal, u2net baked in). |
+| `docker-compose.build.yml` | Overlay: build from this checkout instead of pulling. |
+
+Overlays are combined with repeated `-f`, and they only add — the hardening,
+volumes and environment all come from the base file, so a variant cannot drift
+from it:
+
+```bash
+# GPU
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+
+# ML (background removal); do not combine with the GPU overlay, they use the
+# same host port and both request the GPU
+docker compose -f docker-compose.yml -f docker-compose.ml.yml up -d
+```
+
+### Pinning a version
+
+`latest` follows the default branch. For a reproducible deployment, set exact
+tags in `.env` — none of these are read by the server, they are Compose knobs:
+
+```bash
+IMAGE_TAG=1.0.0
+IMAGE_TAG_GPU=1.0.0-gpu
+IMAGE_TAG_ML=1.0.0-ml
+```
+
+Every image also carries an immutable `sha-<short>` tag, which is the one to
+pin if you want to be certain nothing moves.
 
 ---
 
@@ -334,18 +376,24 @@ paths or library internals, so they are safe to show a model.
 
 ## GPU acceleration
 
-The CPU image is the default and needs no GPU. If you have an NVIDIA card, build
-the GPU image and acceleration is detected automatically.
+The CPU image is the default and needs no GPU. If you have an NVIDIA card,
+switch to the CUDA image with an overlay; acceleration is then detected
+automatically.
 
 ```bash
-# Everything, via the GPU profile
-docker compose --profile gpu up -d --build
-
-# Or add the GPU reservation to the default service
 docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
 ```
 
-Requires the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
+Requires the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+and a driver visible to `nvidia-smi`. Sanity-check the host before blaming the
+image:
+
+```bash
+docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi
+```
+
+The GPU tags are `:gpu` and `:<version>-gpu`; the overlay selects them for you,
+and `IMAGE_TAG_GPU` pins an exact one.
 
 What actually speeds up, and what does not:
 
@@ -372,11 +420,35 @@ docker compose exec pictor-mcp python -m pictor_mcp --check | grep -i accel
 
 ### The `ml` image
 
-Adds rembg + `onnxruntime-gpu` with the u2net weights baked in, so it runs with
-no network access:
+Adds rembg + `onnxruntime-gpu` on top of the CUDA image, with the u2net
+segmentation weights baked in at build time. That baking is the point: the
+container needs no network at runtime, which is what makes it usable on an
+isolated internal network.
 
 ```bash
-docker build --target ml -t pictor-mcp:ml .
+docker compose -f docker-compose.yml -f docker-compose.ml.yml up -d
+```
+
+It is substantially larger (roughly a gigabyte of model and ONNX runtime on top
+of the CUDA wheels), so use it only if you actually need ML background removal.
+The CPU image can already remove a flat background exactly and instantly with
+`method: "color"`, which covers the usual product or logo shot.
+
+Only `u2net` ships inside the image, so only that model works offline. Any other
+`PICTOR_BG_MODEL` is downloaded on first use and needs a writable or pre-seeded
+directory at `U2NET_HOME` — see the commented volume in `docker-compose.ml.yml`.
+
+Do not combine the `ml` and `gpu` overlays: they publish the same host port and
+both request the GPU.
+
+### Building from source
+
+For a local modification, add the build overlay. Note it also needs `target:`
+changed in that file to build the CUDA or ML stage, otherwise Compose builds the
+CPU stage and tags the result with the CUDA tag:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 ```
 
 ---
@@ -403,33 +475,44 @@ Read [SECURITY.md](SECURITY.md) for the full threat model. The short version:
 
 ### Exposing beyond localhost
 
-The defaults are loopback-only. Two deliberate decisions to understand if you
-change that:
+The default port mapping binds to loopback, so nothing off-host can reach the
+server. Making it reachable is a three-part change, and doing only the first
+part is the mistake worth avoiding.
 
-1. **Bind a specific address, not `0.0.0.0`,** when you can:
+**1. Bind the port.** The published port is controlled by `BIND_ADDRESS` in
+`.env`, which is easier to switch back than editing the mapping:
 
-   ```yaml
-   ports:
-     - "192.168.1.10:8077:8077"
-   ```
+```bash
+# .env - reachable from anything that can route to this host
+BIND_ADDRESS=0.0.0.0
+```
 
-2. **Set the allow-lists to match**, or browser-originated requests will be
-   refused (by design):
+The `ports:` block in `docker-compose.yml` also lists the equivalent mappings as
+commented alternatives, including binding one specific interface
+(`192.168.1.10:8077:8077`), which is the safest option when the host has several
+addresses (VPN, `docker0`, a second NIC).
 
-   ```bash
-   PICTOR_ALLOWED_HOSTS=192.168.1.10:8077,pictor.internal:8077
-   PICTOR_ALLOWED_ORIGINS=http://192.168.1.10:8077
-   ```
+**2. Set the allow-lists to match**, or browser-originated requests are refused
+by design. The defaults only name loopback:
 
-   A wildcard bind (`PICTOR_HOST=0.0.0.0`) with no explicit
-   `PICTOR_ALLOWED_ORIGINS` **rejects every browser Origin**. Non-browser MCP
-   clients send no `Origin` header and are unaffected, so this is safe — but it
-   is why a browser-based tool needs the allow-list set.
+```bash
+PICTOR_ALLOWED_HOSTS=192.168.1.10:8077,pictor.internal:8077
+PICTOR_ALLOWED_ORIGINS=http://192.168.1.10:8077
+```
 
-3. **Always set `PICTOR_AUTH_TOKEN`** once it is reachable by anything but you.
-   Better still, terminate TLS in a reverse proxy in front of it and set
-   `PICTOR_ENABLE_HSTS=true`. The server speaks plain HTTP by design; put
-   Caddy/nginx/Traefik in front if the network is not trusted.
+Non-browser MCP clients (DSH, OpenCode, Hermes, Open WebUI's backend) send no
+`Origin` header and are unaffected either way, which is why the loopback default
+is safe. A browser-based client is the case that needs the allow-list.
+
+**3. Always set `PICTOR_AUTH_TOKEN`** once anything but you can reach the port.
+Anyone who can reach an unauthenticated instance has the full tool surface, which
+reads and writes files.
+
+Better still, terminate TLS in a reverse proxy and set `PICTOR_ENABLE_HSTS=true`;
+the server speaks plain HTTP by design, so put Caddy/nginx/Traefik in front if
+the network is not trusted. When the proxy makes the external host or port differ
+from the bind address, also set `PICTOR_PUBLIC_BASE_URL` so generated file links
+point somewhere useful.
 
 ### Generated file URLs
 
@@ -482,6 +565,18 @@ The most consequential ones:
 Invalid values make the server **refuse to start** rather than fall back to a
 less safe default.
 
+Separately, section 0 of `.env.example` holds the **Compose-only** settings.
+They have no `PICTOR_` prefix precisely so they cannot be mistaken for server
+options:
+
+| Variable | Default | Notes |
+|---|---|---|
+| `IMAGE_REPO` | `ghcr.io/therealcickenlegs/pictor-mcp` | Registry path, no tag. |
+| `IMAGE_TAG` | `latest` | CPU image tag. Pin e.g. `1.0.0`. |
+| `IMAGE_TAG_GPU` | `gpu` | CUDA image tag, e.g. `1.0.0-gpu`. |
+| `IMAGE_TAG_ML` | `ml` | ML image tag, e.g. `1.0.0-ml`. |
+| `BIND_ADDRESS` | `127.0.0.1` | Host interface the port binds to. `0.0.0.0` for LAN. |
+
 ---
 
 ## Running without Docker
@@ -511,27 +606,25 @@ the default branch and every `v*` tag:
 
 | Tag | Contents | Platforms |
 |---|---|---|
-| `ghcr.io/OWNER/pictor-mcp:latest` | CPU, ~180 MB | `linux/amd64`, `linux/arm64` |
-| `ghcr.io/OWNER/pictor-mcp:gpu` | CPU + PyTorch CUDA wheels | `linux/amd64` |
-| `ghcr.io/OWNER/pictor-mcp:ml` | GPU + rembg + `onnxruntime-gpu`, u2net baked in | `linux/amd64` |
+| `ghcr.io/therealcickenlegs/pictor-mcp:latest` | CPU, ~180 MB | `linux/amd64`, `linux/arm64` |
+| `ghcr.io/therealcickenlegs/pictor-mcp:gpu` | CPU + PyTorch CUDA wheels | `linux/amd64` |
+| `ghcr.io/therealcickenlegs/pictor-mcp:ml` | GPU + rembg + `onnxruntime-gpu`, u2net baked in | `linux/amd64` |
 
 Version tags are added alongside (`1.0.0`, `1.0`, `1.0.0-gpu`, …), plus an
 immutable `sha-<short>` tag per commit. The CUDA images are amd64-only because
 PyTorch does not publish `linux/arm64` wheels for the CUDA index they install
 from. Images carry a signed build-provenance attestation and an SBOM.
 
-To use a published image instead of building locally, replace the `build:` block
-in `docker-compose.yml` with:
+The compose files already point at these tags, so `docker compose up -d` pulls
+rather than builds. Override `IMAGE_REPO` if you mirror them elsewhere, and
+`IMAGE_TAG*` to pin versions.
 
-```yaml
-services:
-  pictor-mcp:
-    image: ghcr.io/OWNER/pictor-mcp:latest
+A published image reports the version baked into it, so you can always tell what
+you are running:
+
+```bash
+docker run --rm ghcr.io/therealcickenlegs/pictor-mcp:latest python -m pictor_mcp --version
 ```
-
-A published image is tagged with the version the code reports, so
-`docker run --rm ghcr.io/OWNER/pictor-mcp:latest python -m pictor_mcp --version`
-tells you exactly what you are running.
 
 ## Development
 
