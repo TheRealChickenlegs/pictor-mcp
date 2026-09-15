@@ -1,0 +1,257 @@
+name: Publish container images
+
+# Builds the three image variants and pushes them to the GitHub Container
+# Registry (GHCR).
+#
+#   base -> ghcr.io/OWNER/REPO:<version>     also :latest   and :sha-<short>
+#   gpu  -> ghcr.io/OWNER/REPO:<version>-gpu also :gpu      and :sha-<short>-gpu
+#   ml   -> ghcr.io/OWNER/REPO:<version>-ml  also :ml       and :sha-<short>-ml
+#
+# When images are built and pushed:
+#   * push to the default branch -> latest / gpu / ml, plus the short SHA
+#   * push of a `v*` tag         -> the semver tags, plus the short SHA
+#
+# The moving aliases (`latest`, `gpu`, `ml`) are only repointed by the default
+# branch or a version tag, so a manual run from a feature branch can never
+# retag a released image.
+#   * pull request               -> built but NOT pushed, so a broken Dockerfile
+#                                   is caught before merge without needing write
+#                                   permission or polluting the registry
+#
+# GHCR authenticates with the workflow's own GITHUB_TOKEN, so no extra secrets
+# are required. To publish elsewhere (Docker Hub, a private registry), add
+# credentials and change the `registry` and `images` values below.
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - "pyproject.toml"
+      - "README.md"
+      - "src/**"
+      - ".github/workflows/publish.yml"
+  workflow_dispatch:
+    inputs:
+      push:
+        description: "Push images to the registry (uncheck to build only)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  packages: write # required to push to GHCR
+  id-token: write # required for the signed build provenance attestation
+  attestations: write
+
+concurrency:
+  group: publish-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  # Single source of truth for "may this run write to the registry?".
+  # Pull requests never push; a manual run honours its own switch.
+  PUSH_ENABLED: ${{ github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.push) }}
+  # `latest` is only meaningful for the default branch or a release tag.
+  LATEST_ENABLED: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/v') }}
+
+jobs:
+  build:
+    name: ${{ matrix.variant.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - name: base (CPU)
+            target: base
+            suffix: ""
+            alias: ""
+            # arm64 works for the CPU image: Pillow and the MCP SDK both publish
+            # manylinux aarch64 wheels.
+            platforms: linux/amd64,linux/arm64
+          - name: gpu (CUDA)
+            target: gpu
+            suffix: "-gpu"
+            alias: gpu
+            # amd64 only. PyTorch does not publish linux/arm64 CUDA wheels for
+            # the cu124 index this stage installs from, so an arm64 leg would
+            # fail rather than produce a usable image.
+            platforms: linux/amd64
+          - name: ml (CUDA + background removal)
+            target: ml
+            suffix: "-ml"
+            alias: ml
+            # Inherits the GPU stage's amd64-only constraint; onnxruntime-gpu is
+            # amd64-only too.
+            platforms: linux/amd64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        # Needed for the arm64 leg of the CPU image.
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up BuildKit
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to the registry
+        if: env.PUSH_ENABLED == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository }}
+          # Per-tag `suffix` is used rather than the global `flavor.suffix`, so
+          # the short aliases (`gpu`, `ml`) stay clean instead of becoming
+          # `gpu-gpu`.
+          tags: |
+            type=semver,pattern={{version}},suffix=${{ matrix.variant.suffix }}
+            type=semver,pattern={{major}}.{{minor}},suffix=${{ matrix.variant.suffix }}
+            type=sha,format=short,suffix=${{ matrix.variant.suffix }}
+            type=raw,value=latest,suffix=${{ matrix.variant.suffix }},enable=${{ env.LATEST_ENABLED == 'true' }}
+            type=raw,value=${{ matrix.variant.alias }},enable=${{ matrix.variant.alias != '' && env.LATEST_ENABLED == 'true' }}
+          labels: |
+            org.opencontainers.image.title=pictor-mcp
+            org.opencontainers.image.description=Secure MCP server for image operations
+            org.opencontainers.image.licenses=MIT
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          target: ${{ matrix.variant.target }}
+          platforms: ${{ matrix.variant.platforms }}
+          push: ${{ env.PUSH_ENABLED == 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Signed provenance and an SBOM, so a consumer can verify which source
+          # revision and dependencies produced the image.
+          provenance: true
+          sbom: true
+          # Reuse layers between runs. `max` also caches the intermediate stages
+          # the gpu/ml targets build on.
+          cache-from: type=gha,scope=${{ matrix.variant.target }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant.target }}
+
+      - name: Summarise
+        run: |
+          {
+            echo "### ${{ matrix.variant.name }}"
+            echo
+            echo "- target: \`${{ matrix.variant.target }}\`"
+            echo "- platforms: \`${{ matrix.variant.platforms }}\`"
+            echo "- pushed: \`${{ env.PUSH_ENABLED }}\`"
+            echo
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  verify:
+    name: Verify the published images
+    needs: build
+    # The `env` context is not available to a job-level `if`, so the condition
+    # is spelled out here rather than reusing PUSH_ENABLED.
+    if: github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.push)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to the registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Confirm the CUDA images are published for the right platform
+        # Manifest inspection only - the CUDA images are multi-gigabyte and the
+        # runner has no GPU, so pulling them would cost time and prove little.
+        run: |
+          set -euo pipefail
+          sha="sha-$(git rev-parse --short HEAD)"
+          for tag in "${sha}-gpu" "${sha}-ml"; do
+            image="${REGISTRY}/${GITHUB_REPOSITORY}:${tag}"
+            echo "--- ${image}"
+            docker buildx imagetools inspect "${image}" >/dev/null
+            docker buildx imagetools inspect "${image}" | grep -q 'linux/amd64'
+          done
+
+      - name: Run the CPU image and assert its security behaviour
+        # End-to-end proof that the published artefact behaves: it must answer
+        # its health endpoint unauthenticated, reject an unauthenticated MCP
+        # call, and refuse a rebound Host and a foreign Origin.
+        #
+        # The allow-lists are set explicitly because a wildcard bind otherwise
+        # derives a permissive Host list by design - the guard being tested is
+        # the one an operator gets when they pin their real address.
+        run: |
+          set -euo pipefail
+          IMAGE="${REGISTRY}/${GITHUB_REPOSITORY}:sha-$(git rev-parse --short HEAD)"
+          echo "pulling ${IMAGE}"
+          docker pull "${IMAGE}"
+
+          echo "--- runs as a non-root user"
+          docker run --rm --entrypoint id "${IMAGE}"
+
+          echo "--- reports its version"
+          docker run --rm --entrypoint python "${IMAGE}" -m pictor_mcp --version
+
+          echo "--- starts and serves /healthz"
+          docker run -d --name pictor-smoke -p 18077:8077 \
+            -e PICTOR_AUTH_TOKEN=smoke-test-token-0123456789abcdef \
+            -e PICTOR_INPUT_ROOTS=/data/input \
+            -e PICTOR_OUTPUT_ROOT=/data/output \
+            -e PICTOR_ALLOWED_HOSTS='127.0.0.1:*,localhost:*' \
+            -e PICTOR_ALLOWED_ORIGINS='http://127.0.0.1:*' \
+            "${IMAGE}"
+
+          cleanup() { docker logs pictor-smoke || true; docker rm -f pictor-smoke >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18077/healthz >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:18077/healthz
+          echo
+
+          check() {
+            local expected="$1" label="$2"; shift 2
+            local code
+            code=$(curl -s -o /dev/null -w '%{http_code}' "$@")
+            if [ "${code}" != "${expected}" ]; then
+              echo "FAIL: ${label}: expected ${expected}, got ${code}"
+              exit 1
+            fi
+            echo "ok: ${label} -> ${code}"
+          }
+
+          check 401 "unauthenticated MCP call is refused" \
+            -X POST -H 'Content-Type: application/json' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
+            http://127.0.0.1:18077/mcp
+
+          check 403 "foreign Host header is refused (DNS rebinding)" \
+            -H 'Host: evil.example.com' http://127.0.0.1:18077/healthz
+
+          check 403 "foreign Origin is refused" \
+            -H 'Origin: https://evil.example.com' http://127.0.0.1:18077/healthz
+
+          check 200 "authenticated MCP call is accepted" \
+            -X POST -H 'Content-Type: application/json' \
+            -H 'Authorization: Bearer smoke-test-token-0123456789abcdef' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
+            http://127.0.0.1:18077/mcp
