@@ -1,0 +1,48 @@
+# --- Python ------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+*.egg-info/
+.eggs/
+wheels/
+
+# --- virtualenvs -------------------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# --- tooling caches ----------------------------------------------------------
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.pyright/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# --- secrets -----------------------------------------------------------------
+# Never commit real credentials; .env.example is the shared template.
+.env
+.env.*
+!.env.example
+
+# --- runtime data ------------------------------------------------------------
+# Mounted into the container as /data/input (read-only) and /data/output.
+# Host-side scratch used by the container/deployment checks.
+input/
+output/
+.testdata/
+
+# --- editors / OS ------------------------------------------------------------
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp

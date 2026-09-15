@@ -1,0 +1,97 @@
+[project]
+name = "pictor-mcp"
+version = "1.0.0"
+description = "Secure MCP server for image operations: convert, resize, compress, crop, watermark, batch and more."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "pictor-mcp contributors" }]
+keywords = ["mcp", "model-context-protocol", "image", "resize", "convert", "pillow", "docker"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Graphics :: Graphics Conversion",
+]
+
+dependencies = [
+    # MCP Python SDK v2 implements protocol revisions 2025-03-26 .. 2026-07-28 and
+    # auto-negotiates modern (stateless) vs legacy (initialize handshake) per connection.
+    "mcp>=2.2,<3",
+    "pillow>=10.4",
+    "numpy>=1.26",
+    "pydantic>=2.7,<3",
+]
+
+[project.optional-dependencies]
+# Torch/CUDA resize + colour-conversion backend (GPU image).
+gpu = ["torch>=2.4"]
+# ML background removal (onnxruntime; use onnxruntime-gpu in the GPU image).
+bg = ["rembg>=2.0.57", "onnxruntime>=1.18"]
+bg-gpu = ["rembg>=2.0.57", "onnxruntime-gpu>=1.18"]
+# libvips-backed encoder/decoder for very large images (pictor auto-detects it).
+vips = ["pyvips>=2.2"]
+dev = [
+    "pytest>=8.0",
+    # Turns a hung test into a failure instead of a job that runs until the
+    # runner's 6-hour limit.
+    "pytest-timeout>=2.3",
+    "ruff>=0.6",
+    "pyright>=1.1.380",
+    # Used by the deployment contract tests, which parse docker-compose.yml and
+    # .env.example and feed the result through the real config parser.
+    "pyyaml>=6.0",
+]
+all = [
+    "torch>=2.4",
+    "rembg>=2.0.57",
+    "onnxruntime>=1.18",
+    "pyvips>=2.2",
+]
+
+[project.scripts]
+pictor-mcp = "pictor_mcp.server:main"
+
+[project.urls]
+Homepage = "https://github.com/local/pictor-mcp"
+Security = "https://github.com/local/pictor-mcp/blob/main/SECURITY.md"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pictor_mcp"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "S", "RUF"]
+ignore = [
+    "S101",    # assert is fine in tests
+    "E501",    # line length handled by formatter
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+# Async tests use anyio's own pytest plugin (bundled with anyio, which the MCP
+# SDK already depends on). pytest-asyncio is deliberately NOT used: it runs an
+# async fixture and its test in different tasks, so the client transport's
+# cancel scope is exited from the wrong task and teardown fails with
+# "Attempted to exit cancel scope in a different task than it was entered in".
+filterwarnings = ["ignore::DeprecationWarning"]
+# Per-test ceiling, so a deadlock in a live-server test fails fast.
+timeout = 300
+
+[tool.pyright]
+pythonVersion = "3.10"
+include = ["src"]
+typeCheckingMode = "standard"
+reportMissingTypeStubs = false
