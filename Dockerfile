@@ -39,7 +39,7 @@ FROM python:3.12-slim AS base
 
 LABEL org.opencontainers.image.title="pictor-mcp" \
       org.opencontainers.image.description="Secure MCP server for image operations: convert, resize, compress, crop, watermark, batch and more." \
-      org.opencontainers.image.source="https://github.com/local/pictor-mcp" \
+      org.opencontainers.image.source="https://github.com/TheRealChickenlegs/pictor-mcp" \
       org.opencontainers.image.licenses="MIT"
 
 ENV PYTHONUNBUFFERED=1 \

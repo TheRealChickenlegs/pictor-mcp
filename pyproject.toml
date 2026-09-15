@@ -54,8 +54,10 @@ all = [
 pictor-mcp = "pictor_mcp.server:main"
 
 [project.urls]
-Homepage = "https://github.com/local/pictor-mcp"
-Security = "https://github.com/local/pictor-mcp/blob/main/SECURITY.md"
+Homepage = "https://github.com/TheRealChickenlegs/pictor-mcp"
+Repository = "https://github.com/TheRealChickenlegs/pictor-mcp"
+Issues = "https://github.com/TheRealChickenlegs/pictor-mcp/issues"
+Security = "https://github.com/TheRealChickenlegs/pictor-mcp/blob/main/SECURITY.md"
 
 [build-system]
 requires = ["hatchling"]

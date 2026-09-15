@@ -43,7 +43,7 @@ from ..errors import NetworkBlockedError, NetworkDisabledError
 
 _MAX_HEADER_BYTES = 64 * 1024
 _MAX_REDIRECTS_HARD_CAP = 10
-_USER_AGENT = "pictor-mcp/1.0 (+https://github.com/local/pictor-mcp)"
+_USER_AGENT = "pictor-mcp/1.0 (+https://github.com/TheRealChickenlegs/pictor-mcp)"
 
 
 @dataclass(frozen=True, slots=True)
