@@ -16,12 +16,23 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Any
 
 import pytest
-import tomllib
 import yaml
 
 from pictor_mcp.config import load_config
+
+try:  # Python 3.11+
+    # `# novermin` is required: the version-floor check cannot see through the
+    # try/except and would report this module as needing 3.11. The fallback is
+    # what makes it 3.10-compatible, and the checker cannot know that.
+    import tomllib  # novermin
+except ModuleNotFoundError:  # pragma: no cover - exercised by the 3.10 CI job
+    # tomllib only landed in 3.11 and 3.10 is the declared floor, so the version
+    # matrix runs this module there. tomli is the same parser under its former
+    # name, declared as a dev dependency for exactly that case.
+    import tomli as tomllib  # type: ignore[no-redef]
 
 ROOT = Path(__file__).resolve().parent.parent
 BASE_COMPOSE = ROOT / "docker-compose.yml"
@@ -106,6 +117,11 @@ def _env_example_assignments() -> dict[str, str]:
         key, _, value = stripped.partition("=")
         values[key.strip()] = value.strip()
     return values
+
+
+def _pyproject() -> dict[str, Any]:
+    """Parse pyproject.toml, working on 3.10 as well as 3.11+."""
+    return tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
 
 
 def _config_names() -> set[str]:
@@ -364,19 +380,32 @@ class TestProjectMetadata:
     def test_package_version_matches_pyproject(self) -> None:
         import pictor_mcp
 
-        declared = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
-        assert pictor_mcp.__version__ == declared
+        assert pictor_mcp.__version__ == _pyproject()["version"]
 
     def test_the_declared_python_floor_is_a_constraint(self) -> None:
-        project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
-        assert project["requires-python"].startswith(">=")
+        assert _pyproject()["requires-python"].startswith(">=")
 
     def test_project_urls_point_at_the_real_repository(self) -> None:
         """A published artefact must not advertise a placeholder."""
-        urls = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["urls"]
+        urls = _pyproject()["urls"]
         assert urls, "no project URLs declared"
         for name, value in urls.items():
             assert "TheRealChickenlegs/pictor-mcp" in value, f"{name} -> {value}"
+
+    def test_the_ci_matrix_covers_the_declared_floor(self) -> None:
+        """Keep requires-python and the CI matrix from disagreeing.
+
+        They are two statements of the same promise, and a matrix that omits the
+        floor version leaves the promise unverified - which is how the tomllib
+        import in this very module reached a green build.
+        """
+        floor = _pyproject()["requires-python"]
+        major, minor = re.findall(r"\d+", floor)[:2]
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+        matrix = re.search(r"python-version: \[([^\]]+)\]", workflow)
+        assert matrix, "the CI workflow declares no python-version matrix"
+        listed = {value.strip().strip('"') for value in matrix.group(1).split(",")}
+        assert f"{major}.{minor}" in listed, f"floor {major}.{minor} missing from {sorted(listed)}"
 
 
 class TestDockerfile:

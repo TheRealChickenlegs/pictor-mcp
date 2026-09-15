@@ -42,6 +42,13 @@ dev = [
     # Used by the deployment contract tests, which parse docker-compose.yml and
     # .env.example and feed the result through the real config parser.
     "pyyaml>=6.0",
+    # tomllib only exists from 3.11, and 3.10 is the declared floor, so the
+    # deployment tests fall back to the same parser under its former name.
+    "tomli>=2.0; python_version < '3.11'",
+    # Statically verifies that nothing in the tree needs a newer interpreter
+    # than requires-python claims. Run by the CI lint job, and available locally
+    # so the floor can be checked without waiting for the version matrix.
+    "vermin>=1.6",
 ]
 all = [
     "torch>=2.4",
