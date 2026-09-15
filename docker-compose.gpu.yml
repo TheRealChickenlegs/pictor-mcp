@@ -1,50 +1,48 @@
-# Overlay for the CPU compose file that turns the deployment into a GPU one.
+# pictor-mcp - GPU overlay.
 #
-#   mkdir -p input output && chown 10001:10001 output
-#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+# Switches the deployment from the CPU image to the CUDA image and passes the
+# host's NVIDIA devices through to the container.
 #
-# Merge semantics: this file only *adds* the GPU build target, the device
-# reservations and the GPU environment; everything else (ports, volumes,
-# hardening) still comes from docker-compose.yml, so the two files cannot drift
-# apart on security settings.
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
 #
-# Requires the NVIDIA Container Toolkit on the host:
-#   https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html
+# Prerequisites on the host:
+#   * an NVIDIA GPU and a recent driver  (check with `nvidia-smi`)
+#   * the NVIDIA Container Toolkit:
+#     https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html
+#   * verify with:  docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi
 #
-# `gpus: all` is the Compose v2 form and is used here. The older Swarm-style form
-# is deliberately NOT given alongside it: Compose normalises `gpus` into
-# `deploy.resources.reservations.devices` internally, and supplying both has been
-# known to trip a "conflicting device requests" error. If you are on a Compose
-# version without `gpus`, comment it out and uncomment the `deploy:` block below
-# each service instead.
+# Without the toolkit, `up` fails with "could not select device driver". That is
+# a host configuration problem, not a problem with the image: install the
+# toolkit or use the CPU image.
+#
+# What the GPU actually accelerates, so you can tell whether it is working:
+#   * resampling (resize) above PICTOR_GPU_MIN_PIXELS
+#   * ML background removal, with the ml overlay
+#   * NOT encoding - libjpeg-turbo and libwebp have no CUDA path and are already
+#     fast on the CPU
+#
+# Confirm from inside the running container:
+#   docker compose exec pictor-mcp python -m pictor_mcp --check | grep -i accel
+# or ask the server by calling the image_capabilities tool.
 
 services:
   pictor-mcp:
-    build:
-      context: .
-      target: gpu
-    image: pictor-mcp:gpu
-    environment:
-      # auto = use CUDA when torch can see a device, otherwise stay on the CPU
-      # path. Set to `torch` to make a missing GPU a hard failure instead.
-      PICTOR_GPU: ${PICTOR_GPU:-auto}
-    gpus: all
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: all
-    #           capabilities: [gpu]
+    # The GPU image is published as :gpu and as :<version>-gpu. Pin the version
+    # for a reproducible deployment: IMAGE_TAG_GPU=1.0.0-gpu
+    image: ${IMAGE_REPO:-ghcr.io/therealcickenlegs/pictor-mcp}:${IMAGE_TAG_GPU:-gpu}
 
-  # Keeps the profiled service consistent when someone combines the overlay with
-  # `--profile gpu`; it is already a GPU service in the base file.
-  pictor-mcp-gpu:
-    build:
-      context: .
-      target: gpu
     environment:
+      # auto  = use CUDA when torch can see a device, otherwise fall back to the
+      #         CPU path. Safe on a host without a GPU, so it is the default.
+      # torch = require CUDA and fail at startup if it is unavailable. Use this
+      #         if silently falling back to the CPU would be a nasty surprise.
       PICTOR_GPU: ${PICTOR_GPU:-auto}
+
+    # `gpus: all` is the Compose v2 form. It is deliberately the only device
+    # request here: Compose normalises it into
+    # deploy.resources.reservations.devices internally, and supplying both has
+    # been known to trip a "conflicting device requests" error. On a Compose
+    # version without `gpus`, comment it out and uncomment the block below.
     gpus: all
     # deploy:
     #   resources:

@@ -1,110 +1,209 @@
-# pictor-mcp - CPU deployment (default) with an optional GPU service.
+# pictor-mcp - run the published image.
 #
-#   mkdir -p input output && chown 10001:10001 output
-#   cp .env.example .env          # then edit .env and set PICTOR_AUTH_TOKEN
-#   docker compose up -d --build
+# This file pulls a prebuilt image from the GitHub Container Registry. Nothing
+# is compiled locally, so `up` takes seconds instead of minutes.
 #
-# Reachable at http://127.0.0.1:8077/mcp (health: http://127.0.0.1:8077/healthz).
+# ---------------------------------------------------------------------------
+# Quick start
+# ---------------------------------------------------------------------------
 #
-# GPU instead of CPU:
-#   docker compose --profile gpu up -d --build
-# or, to add the GPU reservation to the default service:
+#   mkdir -p input output
+#   sudo chown 10001:10001 output        # the container runs as uid 10001
+#   cp .env.example .env                 # then set PICTOR_AUTH_TOKEN
+#   docker compose up -d
+#
+# Images are built and published by .github/workflows/publish.yml. Confirm the
+# tag you want exists before the first `up`:
+#
+#   docker pull ghcr.io/therealcickenlegs/pictor-mcp:latest
+#
+# If the repository is private the registry package is private too: either make
+# it public once under the repository's Packages tab, or run
+# `docker login ghcr.io` with a token that has read:packages.
+#
+# ---------------------------------------------------------------------------
+# Which file to use
+# ---------------------------------------------------------------------------
+#
+#   docker-compose.yml              CPU image                      (this file)
+#   + docker-compose.gpu.yml        CUDA image, GPU passthrough
+#   + docker-compose.ml.yml         CUDA image + background-removal model
+#   + docker-compose.build.yml      build from this checkout instead
+#
+# Overlays are additive, so combine them with repeated -f:
+#
 #   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
 #
-# Do not use the `gpu` profile and the overlay together: they both publish the
-# same host port and would collide.
+# Do not combine gpu and ml: they publish the same host port and both request
+# the GPU, so run one or the other.
+#
+# ---------------------------------------------------------------------------
+# Exposing this beyond your own machine
+# ---------------------------------------------------------------------------
+#
+# The default port mapping binds to loopback, so nothing off-host can reach the
+# server even if no token is set. Read the `ports:` block below before changing
+# that: exposing it also means setting PICTOR_ALLOWED_HOSTS,
+# PICTOR_ALLOWED_ORIGINS and PICTOR_AUTH_TOKEN, and the server will refuse
+# browser requests until the allow-lists match.
 
 # ---------------------------------------------------------------------------
-# Shared environment. Defined once as a YAML anchor and merged into both
-# services, so the CPU and GPU paths cannot drift apart - a security setting
-# that silently applied to only one of them would be a real bug.
+# Deployment knobs. These are read by Compose itself, not by the server.
 #
-# Every value is `${VAR:-default}` so a .env file or the shell can override any
-# of them without editing this file. The defaults are the secure ones: no URL
-# fetching, no output serving, no credentials baked anywhere.
+#   IMAGE_REPO      registry path, without a tag
+#   IMAGE_TAG       tag for the CPU image (this file)
+#   IMAGE_TAG_GPU   tag for the CUDA image (docker-compose.gpu.yml)
+#   IMAGE_TAG_ML    tag for the ML image (docker-compose.ml.yml)
+#   BIND_ADDRESS    host interface the published port binds to
+#
+# For a reproducible deployment, pin exact versions instead of moving tags:
+#   IMAGE_TAG=1.0.0
+#   IMAGE_TAG_GPU=1.0.0-gpu
+#   IMAGE_TAG_ML=1.0.0-ml
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Server configuration, shared by every service so the variants cannot drift.
+#
+# Every value is ${VAR:-default}, so .env or the shell can override any of them
+# without editing this file. The defaults are the secure ones: no URL fetching,
+# no output serving, no credentials.
+#
+# .env.example is the full annotated reference, and
+# `docker compose exec pictor-mcp python -m pictor_mcp --check` prints what the
+# running container actually resolved.
 # ---------------------------------------------------------------------------
 x-pictor-environment: &pictor-environment
-  # --- transport / bind ----------------------------------------------------
+  # --- transport -----------------------------------------------------------
+  # streamable-http is what every network client wants. Switch to stdio only if
+  # a client launches the container itself, e.g. `docker compose run`.
   PICTOR_TRANSPORT: ${PICTOR_TRANSPORT:-streamable-http}
-  # 0.0.0.0 inside the container is required for the published port to reach it;
-  # the port mapping below is what actually restricts reachability.
+  # 0.0.0.0 *inside the container* is required for the published port to reach
+  # the server. It does not expose anything by itself: reachability is decided
+  # by the `ports:` mapping below.
   PICTOR_HOST: ${PICTOR_HOST:-0.0.0.0}
   PICTOR_PORT: ${PICTOR_PORT:-8077}
   PICTOR_STREAMABLE_HTTP_PATH: ${PICTOR_STREAMABLE_HTTP_PATH:-/mcp}
-  # Session behaviour. The SDK auto-negotiates per connection: modern
-  # (2026-07-28) requests are served statelessly and legacy clients still get the
-  # initialize handshake, so these defaults suit every current client.
+  # The SDK negotiates the protocol per connection: modern stateless requests
+  # and legacy initialize-handshake clients are both served. Only change these
+  # for a specific misbehaving client.
   PICTOR_STATELESS_HTTP: ${PICTOR_STATELESS_HTTP:-true}
   PICTOR_JSON_RESPONSE: ${PICTOR_JSON_RESPONSE:-false}
+  # DEBUG | INFO | WARNING | ERROR | CRITICAL
   PICTOR_LOG_LEVEL: ${PICTOR_LOG_LEVEL:-INFO}
 
-  # --- filesystem jail -----------------------------------------------------
+  # --- storage -------------------------------------------------------------
+  # /data/input is where the server reads from and /data/output is the only
+  # place it writes. Both are mounted below; change them only if you also
+  # change the volume mounts.
   PICTOR_INPUT_ROOTS: ${PICTOR_INPUT_ROOTS:-/data/input}
   PICTOR_OUTPUT_ROOT: ${PICTOR_OUTPUT_ROOT:-/data/output}
+  # Fonts the text-watermark tool may use. Callers pick a font by name from this
+  # directory, never by path, so this is not another file-read primitive.
   PICTOR_FONT_DIRS: ${PICTOR_FONT_DIRS:-/usr/share/fonts}
 
   # --- authentication ------------------------------------------------------
-  # Empty means UNAUTHENTICATED. Generate one with `openssl rand -hex 32`; the
-  # server refuses tokens shorter than 16 characters.
+  # Generate with: openssl rand -hex 32
+  # Leave empty ONLY while the port is bound to loopback. The moment the server
+  # is reachable from anywhere else, set this: anyone who can reach the port
+  # otherwise has the full tool surface, which reads and writes files.
+  # Minimum 16 characters; the server refuses to start with a shorter one.
   PICTOR_AUTH_TOKEN: ${PICTOR_AUTH_TOKEN:-}
+  # Signing secret for generated file URLs. Defaults to PICTOR_AUTH_TOKEN, which
+  # is fine. Set it separately only if you want existing links to survive a
+  # token change.
   PICTOR_URL_SECRET: ${PICTOR_URL_SECRET:-}
+  # How long a generated file link stays valid.
   PICTOR_URL_TTL_SECONDS: ${PICTOR_URL_TTL_SECONDS:-3600}
 
-  # --- DNS-rebinding / origin allow-lists ----------------------------------
-  # These must match the address clients actually use. The defaults suit the
-  # loopback port mapping below; if you expose the port on a LAN address, set
-  # both to that address (and its http:// origin) in .env.
+  # --- which hosts may reach the API ---------------------------------------
+  # Host and Origin are validated on every route; this is the DNS-rebinding
+  # defence. These defaults suit the loopback port mapping below.
+  #
+  # If you publish the port on a LAN address you MUST add that address here, or
+  # every browser-originated request is refused:
+  #   PICTOR_ALLOWED_HOSTS=192.168.1.10:8077,pictor.internal:8077
+  #   PICTOR_ALLOWED_ORIGINS=http://192.168.1.10:8077
+  # Non-browser MCP clients send no Origin, so they are unaffected either way.
   PICTOR_DNS_REBINDING_PROTECTION: ${PICTOR_DNS_REBINDING_PROTECTION:-true}
   PICTOR_ALLOWED_HOSTS: ${PICTOR_ALLOWED_HOSTS:-127.0.0.1:*,localhost:*,127.0.0.1:8077,localhost:8077}
   PICTOR_ALLOWED_ORIGINS: ${PICTOR_ALLOWED_ORIGINS:-http://127.0.0.1:*,http://localhost:*}
+  # Only meaningful behind TLS termination. Set true once a reverse proxy serves
+  # this over https.
   PICTOR_ENABLE_HSTS: ${PICTOR_ENABLE_HSTS:-false}
-  # Per-request access log. Off by default because signed /files/ URLs carry
-  # their HMAC in the query string, making a logged line a usable credential
-  # for the link's lifetime. Application logs are always on.
+  # Per-request access log. Off because signed /files/ URLs carry their HMAC in
+  # the query string, so a logged line is a usable credential for the link's
+  # lifetime. Application logging is unaffected.
   PICTOR_HTTP_ACCESS_LOG: ${PICTOR_HTTP_ACCESS_LOG:-false}
 
-  # --- output serving ------------------------------------------------------
-  # Requires PICTOR_AUTH_TOKEN or PICTOR_URL_SECRET; the server refuses to start
-  # otherwise, so generated files are never world-readable. Set
-  # PICTOR_PUBLIC_BASE_URL when the externally visible hostname or port differs
-  # from the bind address, otherwise generated URLs point at 127.0.0.1:<port>.
+  # --- serving generated files ---------------------------------------------
+  # Turn this on if a chat UI should render results inline: responses then
+  # include a signed URL and a markdown image link. Requires PICTOR_AUTH_TOKEN
+  # or PICTOR_URL_SECRET - the server refuses to start otherwise, so the output
+  # directory can never be world-readable by accident.
   PICTOR_SERVE_OUTPUTS: ${PICTOR_SERVE_OUTPUTS:-false}
+  # Set this when the externally visible host or port differs from the bind
+  # address (reverse proxy, different published port). Otherwise generated links
+  # point at 127.0.0.1 and are useless to anyone else.
+  #   PICTOR_PUBLIC_BASE_URL=https://images.example.com
   PICTOR_PUBLIC_BASE_URL: ${PICTOR_PUBLIC_BASE_URL:-}
 
-  # --- outbound URL fetching (SSRF-guarded, off by default) ---------------
+  # --- fetching images from URLs (off by default) --------------------------
+  # Enabling this lets a model ask the server to fetch a URL, so it is an SSRF
+  # surface. The guard blocks private, loopback, link-local, CGNAT and cloud
+  # metadata addresses, and pins the connection to the validated IP. Restrict
+  # the hosts as well if you can.
   PICTOR_ALLOW_NET_FETCH: ${PICTOR_ALLOW_NET_FETCH:-false}
   PICTOR_FETCH_ALLOWED_HOSTS: ${PICTOR_FETCH_ALLOWED_HOSTS:-}
   PICTOR_FETCH_ALLOWED_PORTS: ${PICTOR_FETCH_ALLOWED_PORTS:-80,443}
   PICTOR_FETCH_MAX_BYTES: ${PICTOR_FETCH_MAX_BYTES:-33554432}
   PICTOR_FETCH_MAX_REDIRECTS: ${PICTOR_FETCH_MAX_REDIRECTS:-3}
   PICTOR_FETCH_TIMEOUT_SECONDS: ${PICTOR_FETCH_TIMEOUT_SECONDS:-15}
+  # Turning this off disables certificate verification. Only for a pinned
+  # internal mirror; it is a real downgrade anywhere else.
   PICTOR_FETCH_VERIFY_TLS: ${PICTOR_FETCH_VERIFY_TLS:-true}
 
-  # --- resource limits (decompression-bomb guards) -------------------------
+  # --- resource limits (raise only alongside the memory limit) -------------
+  # These are decompression-bomb and runaway-work guards. Raising them without
+  # raising mem_limit below is how you get an OOM kill that takes the server
+  # down for every client.
   PICTOR_MAX_PIXELS: ${PICTOR_MAX_PIXELS:-64000000}
   PICTOR_MAX_FILE_BYTES: ${PICTOR_MAX_FILE_BYTES:-67108864}
   PICTOR_MAX_DIMENSION: ${PICTOR_MAX_DIMENSION:-24000}
   PICTOR_MAX_FRAMES: ${PICTOR_MAX_FRAMES:-120}
-  # Bounds the *product* of frames and pixels: a multi-frame image is decoded
-  # into one full bitmap per frame before re-encoding, so per-frame and
-  # frame-count limits alone still allow an unbounded total allocation.
+  # Bounds width x height x frames. A multi-frame image is decoded into one full
+  # bitmap per frame before re-encoding, so the per-frame and frame-count limits
+  # alone do not bound the total.
   PICTOR_MAX_ANIMATION_PIXELS: ${PICTOR_MAX_ANIMATION_PIXELS:-128000000}
   PICTOR_MAX_OUTPUT_PIXELS: ${PICTOR_MAX_OUTPUT_PIXELS:-256000000}
+  # Larger than the SDK's 4 MiB default because inline base64 images need it.
   PICTOR_MAX_REQUEST_BODY_BYTES: ${PICTOR_MAX_REQUEST_BODY_BYTES:-50331648}
   PICTOR_MAX_EXIF_BYTES: ${PICTOR_MAX_EXIF_BYTES:-65536}
+  # Concurrent operations. Memory scales with this: see mem_limit below.
   PICTOR_MAX_CONCURRENCY: ${PICTOR_MAX_CONCURRENCY:-4}
   PICTOR_MAX_BATCH_FILES: ${PICTOR_MAX_BATCH_FILES:-64}
+  # Cooperative wall-clock budget, checked between pipeline steps and quality
+  # probes. It bounds sequences of work, not one long encode.
   PICTOR_OP_TIMEOUT_SECONDS: ${PICTOR_OP_TIMEOUT_SECONDS:-120}
   PICTOR_MAX_INPUT_BASE64_BYTES: ${PICTOR_MAX_INPUT_BASE64_BYTES:-50331648}
   PICTOR_MAX_INLINE_IMAGE_BYTES: ${PICTOR_MAX_INLINE_IMAGE_BYTES:-1048576}
 
-  # --- image pipeline behaviour -------------------------------------------
+  # --- output behaviour ----------------------------------------------------
+  # Strip EXIF, GPS and ICC from outputs. Leave true unless a downstream step
+  # genuinely needs the metadata: it is both a privacy and a size win.
   PICTOR_STRIP_METADATA: ${PICTOR_STRIP_METADATA:-true}
+  # Return the image inline in tool results so vision-capable clients can see
+  # it. Costs context; turn off for text-only clients.
   PICTOR_INLINE_IMAGES: ${PICTOR_INLINE_IMAGES:-true}
+  # off | auto | torch. The CPU image has no torch, so `off` is correct here and
+  # avoids a pointless probe at startup.
+  PICTOR_GPU: ${PICTOR_GPU:-off}
+  # Images below this size stay on the CPU: the device transfer costs more than
+  # the resize.
   PICTOR_GPU_MIN_PIXELS: ${PICTOR_GPU_MIN_PIXELS:-4000000}
+  # u2net | u2netp | isnet-general-use | silueta. Only u2net ships inside the ML
+  # image; any other model needs its weights present under U2NET_HOME.
   PICTOR_BG_MODEL: ${PICTOR_BG_MODEL:-u2net}
-  # Where rembg keeps its ONNX weights; the `ml` image bakes u2net in at this
-  # path. Only models preseeded there work offline.
   U2NET_HOME: ${U2NET_HOME:-/opt/models}
 
   # Keep interpreter and native-library caches on the tmpfs below, never on the
@@ -113,27 +212,29 @@ x-pictor-environment: &pictor-environment
   HOME: /tmp
   NUMBA_CACHE_DIR: /tmp
 
-# Memory ceiling, shared by both services.
+# ---------------------------------------------------------------------------
+# Runtime hardening, shared by every service.
 #
-# Worst case per operation is roughly PICTOR_MAX_PIXELS x ~16 bytes: a 64 MP
-# image is 192 MB as RGB and 256 MB as RGBA, and the float intermediates used by
-# resize, compare and saliency run 4-8 bytes per channel per pixel with two or
-# three live at once. At the default PICTOR_MAX_CONCURRENCY=4 that is a few
-# gigabytes. If you lower this limit, lower PICTOR_MAX_CONCURRENCY or
-# PICTOR_MAX_PIXELS to match: an OOM kill takes the server down for every client.
-x-pictor-limits: &pictor-limits
+# The memory ceiling is not arbitrary. Worst case per operation is roughly
+# PICTOR_MAX_PIXELS x ~16 bytes: a 64 MP image is 192 MB as RGB and 256 MB as
+# RGBA, and the float intermediates used by resize and comparison run 4-8 bytes
+# per channel per pixel with two or three live at once. At the default
+# PICTOR_MAX_CONCURRENCY=4 that is a few gigabytes. If you lower mem_limit,
+# lower PICTOR_MAX_CONCURRENCY or PICTOR_MAX_PIXELS to match.
+# ---------------------------------------------------------------------------
+x-pictor-hardening: &pictor-hardening
+  # Restart on crash, but never fight a deliberate `docker compose stop`.
   restart: unless-stopped
   # The image needs no writable root: the package is installed read-only and all
-  # writes go to /data/output. This turns any accidental write, or a compromised
+  # writes go to /data/output. This turns an accidental write, or a compromised
   # dependency trying to plant a persistence file, into a hard failure.
   read_only: true
-  # The only scratch space. Pillow's atomic writes happen in the output directory
-  # (see security/paths.PathJail), not here, so this stays small. mode=1777
-  # matches a normal /tmp so every uid can use it.
+  # The only scratch space. Pillow's atomic writes happen in the output
+  # directory, not here, so this stays small. mode=1777 matches a normal /tmp.
   tmpfs:
     - /tmp:size=256m,mode=1777
-  # Drop every Linux capability. The service binds port 8077 (>1024, so it does
-  # not need CAP_NET_BIND_SERVICE) and never changes uid, so it needs none.
+  # Drop every Linux capability. The server binds port 8077 (>1024, so no
+  # CAP_NET_BIND_SERVICE) and never changes uid, so it needs none.
   cap_drop:
     - ALL
   # Blocks setuid/setgid binaries from granting privileges, so a foothold inside
@@ -145,96 +246,66 @@ x-pictor-limits: &pictor-limits
   mem_limit: 4g
   # Swap capped at the same value so the kernel cannot hide an OOM behind disk.
   memswap_limit: 4g
-  # Redundant with the image's USER, but belt-and-braces: even if the image is
+  # Redundant with the image's USER, but belt-and-braces: even if the image were
   # replaced by a root-running one, this forces the unprivileged uid.
   user: "10001:10001"
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8077/healthz', timeout=4).status == 200 else 1)"]
+    interval: 30s
+    timeout: 5s
+    retries: 3
+    start_period: 15s
 
-# Volume mounts, shared by both services.
+# ---------------------------------------------------------------------------
+# Volumes, shared by every service.
+# ---------------------------------------------------------------------------
 x-pictor-volumes: &pictor-volumes
-  # ./input must exist on the host before `up`. It is mounted read-only so a
-  # compromised server cannot corrupt or plant files among your originals.
+  # Where your source images live. Mounted read-only so a compromised server
+  # cannot corrupt or plant files among your originals. Create it first:
+  #   mkdir -p input output && sudo chown 10001:10001 output
   - ./input:/data/input:ro
-  # ./output must exist and be writable by uid 10001 (the `pictor` user):
-  #   mkdir -p input output && chown 10001:10001 output
-  # The server exits at startup with a clear message if it cannot write here,
-  # rather than failing later on the first tool call.
+  # Where results are written, and the only writable path in the container. The
+  # server exits at startup with a clear message if it cannot write here, rather
+  # than failing later on the first tool call.
   - ./output:/data/output
+  # ML image only, and only if you need a background-removal model other than
+  # the baked-in u2net. Mounting this hides the preseeded weights.
+  # - ./models:/opt/models
 
 services:
   pictor-mcp:
-    # Build locally from this checkout. To use the published image instead,
-    # delete the `build:` block and uncomment the line below.
-    build:
-      context: .
-      target: base
-    image: pictor-mcp:latest
-    # image: ghcr.io/OWNER/pictor-mcp:latest
+    image: ${IMAGE_REPO:-ghcr.io/therealcickenlegs/pictor-mcp}:${IMAGE_TAG:-latest}
     container_name: pictor-mcp
 
-    # Loopback-only by default. This is the single most important deployment
-    # setting: with it, nothing off-host can reach the server even if
-    # PICTOR_AUTH_TOKEN is unset. To expose it on your LAN, change the left-hand
-    # side to the host address you want (e.g. "192.168.1.10:8077:8077") and then
-    # also set PICTOR_ALLOWED_HOSTS and PICTOR_ALLOWED_ORIGINS in .env to that
-    # address, because the browser's Host header will no longer match the
-    # loopback allow-list. Never expose it without a token.
+    # -----------------------------------------------------------------------
+    # Ports.
+    #
+    # BIND_ADDRESS is the *host* interface. The default, 127.0.0.1, means
+    # loopback only: nothing on your LAN and nothing on the internet can reach
+    # the server. Both sides use PICTOR_PORT so the published and listening
+    # ports cannot drift apart.
+    # -----------------------------------------------------------------------
     ports:
-      - "127.0.0.1:8077:8077"
+      - "${BIND_ADDRESS:-127.0.0.1}:${PICTOR_PORT:-8077}:${PICTOR_PORT:-8077}"
+
+      # --- alternatives: comment the line above, uncomment one below --------
+      #
+      # ALL INTERFACES - reachable from anything that can route to this host.
+      # This is the change you want for LAN access, and it is what makes the
+      # authentication and allow-list settings above mandatory.
+      #   - "${PICTOR_PORT:-8077}:${PICTOR_PORT:-8077}"
+      #
+      # Same effect, easier to switch back: leave the mapping above alone and
+      # set BIND_ADDRESS=0.0.0.0 in .env.
+      #
+      # ONE specific interface only - the safest way to publish on a LAN when
+      # the host has several addresses (VPN, docker0, a second NIC):
+      #   - "192.168.1.10:${PICTOR_PORT:-8077}:${PICTOR_PORT:-8077}"
+      #
+      # A DIFFERENT host port, e.g. because 8077 is already taken. The container
+      # port on the right stays 8077:
+      #   - "${BIND_ADDRESS:-127.0.0.1}:9000:8077"
 
     volumes: *pictor-volumes
-
-    environment:
-      <<: *pictor-environment
-      # No torch in the CPU image, so acceleration is explicitly off rather than
-      # spending startup time discovering that.
-      PICTOR_GPU: ${PICTOR_GPU:-off}
-
-    <<: *pictor-limits
-
-    # Explicit copy of the image healthcheck so the behaviour is visible and
-    # overridable at the deployment layer.
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8077/healthz', timeout=4).status == 200 else 1)"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 15s
-
-  # GPU variant, behind a profile so a plain `docker compose up -d` never tries
-  # to build a multi-gigabyte CUDA image or schedule a GPU that may not exist:
-  #   docker compose --profile gpu up -d --build
-  #
-  # This service and the CPU one publish the same host port, so they are
-  # alternatives. Enabling the profile starts only this service, which is why no
-  # port change is needed.
-  pictor-mcp-gpu:
-    profiles: ["gpu"]
-    build:
-      context: .
-      target: gpu
-    image: pictor-mcp:gpu
-    container_name: pictor-mcp-gpu
-
-    ports:
-      - "127.0.0.1:8077:8077"
-
-    volumes: *pictor-volumes
-
-    environment:
-      <<: *pictor-environment
-      # auto = use CUDA only when torch can actually see a device, and fall back
-      # to the CPU path otherwise, so the same image runs on a host without one.
-      PICTOR_GPU: ${PICTOR_GPU:-auto}
-
-    <<: *pictor-limits
-
-    # Expose every GPU to the container. `gpus: all` is the Compose v2 form;
-    # docker-compose.gpu.yml also adds the classic deploy.resources form.
-    gpus: all
-
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8077/healthz', timeout=4).status == 200 else 1)"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 15s
+    environment: *pictor-environment
+    <<: *pictor-hardening

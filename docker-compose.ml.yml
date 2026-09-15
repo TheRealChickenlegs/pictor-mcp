@@ -1,0 +1,54 @@
+# pictor-mcp - ML overlay (GPU image plus background removal).
+#
+# Switches to the `ml` image, which adds rembg and onnxruntime-gpu on top of the
+# CUDA image and has the u2net segmentation weights baked in at build time. That
+# baking is the point: the container needs no network access at runtime, which is
+# what makes it usable on an isolated internal network.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.ml.yml up -d
+#
+# This image is much larger than the CPU one (roughly 1 GB of model and ONNX
+# runtime on top of the CUDA wheels). Use it only if you actually need ML
+# background removal; the CPU image can already remove a flat background exactly
+# and instantly with method="color", which covers the common product/logo case.
+#
+# Requires the same NVIDIA Container Toolkit setup as docker-compose.gpu.yml.
+#
+# Do not combine this with docker-compose.gpu.yml: both request the GPU and both
+# publish the same host port.
+#
+# Which model is used:
+#   * only `u2net` is baked in, so `PICTOR_BG_MODEL=u2net` works offline
+#   * any other model is downloaded lazily and needs either a writable mount at
+#     U2NET_HOME or a pre-seeded directory (see the commented volume in
+#     docker-compose.yml)
+#   * models live at $U2NET_HOME/models/<name>/ inside the container
+
+services:
+  pictor-mcp:
+    image: ${IMAGE_REPO:-ghcr.io/therealcickenlegs/pictor-mcp}:${IMAGE_TAG_ML:-ml}
+
+    environment:
+      PICTOR_GPU: ${PICTOR_GPU:-auto}
+      # u2net | u2netp | isnet-general-use | silueta
+      PICTOR_BG_MODEL: ${PICTOR_BG_MODEL:-u2net}
+      # Where rembg looks for weights. The image bakes u2net in at this path, so
+      # changing it without also mounting weights there disables offline use.
+      U2NET_HOME: ${U2NET_HOME:-/opt/models}
+
+    gpus: all
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+    volumes:
+      - ./input:/data/input:ro
+      - ./output:/data/output
+      # Uncomment to supply or cache additional background-removal models.
+      # Note this hides the u2net weights baked into the image unless you copy
+      # them in first, so leave it commented unless you need another model.
+      # - ./models:/opt/models

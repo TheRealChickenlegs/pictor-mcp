@@ -1,0 +1,40 @@
+# pictor-mcp - build from source instead of pulling the published image.
+#
+# Overlay for contributors and for anyone who needs a local modification. The
+# default compose path pulls a prebuilt image from GHCR; this is the opt-out.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+#
+# Combined with an image overlay, this one wins for the image name but you must
+# also point `target` at the stage you want, otherwise Compose builds the CPU
+# stages and tags the result with the CUDA tag, which produces a working image
+# with no torch in it. The `target` values below match the stage names in the
+# Dockerfile:
+#
+#   default -> the CPU image (alias for `base`, the Dockerfile's last stage)
+#   gpu     -> CPU plus PyTorch CUDA wheels
+#   ml      -> gpu plus rembg/onnxruntime-gpu with u2net baked in
+#
+# So, to build and run the local GPU image:
+#
+#   docker compose \
+#     -f docker-compose.yml \
+#     -f docker-compose.gpu.yml \
+#     -f docker-compose.build.yml \
+#     up -d --build
+#
+# ...after changing `target: default` below to `target: gpu`.
+#
+# The image name is overridden to a local tag so a build can never overwrite a
+# published tag in the registry by accident.
+
+services:
+  pictor-mcp:
+    build:
+      context: .
+      # Change to `gpu` or `ml` when combining this with one of those overlays.
+      target: default
+      # Uncomment to pass a specific PyTorch build to the gpu/ml stages.
+      # args:
+      #   TORCH_VERSION: "2.4.1"
+    image: pictor-mcp:local
