@@ -8,9 +8,14 @@
 # ---------------------------------------------------------------------------
 #
 #   mkdir -p input output
-#   sudo chown 10001:10001 output        # the container runs as uid 10001
 #   cp .env.example .env                 # then set PICTOR_AUTH_TOKEN
 #   docker compose up -d
+#
+# If your uid or gid is not 1000, put your own in .env first so the container
+# writes files as you rather than as an unrelated account:
+#
+#   id -u   # e.g. 1000  ->  PUID
+#   id -g   # e.g. 1000  ->  PGID
 #
 # Images are built and published by .github/workflows/publish.yml. Confirm the
 # tag you want exists before the first `up`:
@@ -36,6 +41,29 @@
 #
 # Do not combine gpu and ml: they publish the same host port and both request
 # the GPU, so run one or the other.
+#
+# ---------------------------------------------------------------------------
+# File ownership (PUID / PGID)
+# ---------------------------------------------------------------------------
+#
+# The single most common setup problem is a permission error at startup:
+#
+#   configuration error: output root /data/output is not writable by uid ...
+#
+# It means the container's uid and the owner of ./output disagree. Two ways to
+# fix it, and the default here is the first:
+#
+#   1. Set PUID and PGID in .env to `id -u` and `id -g`. The container adopts
+#      your identity, so files it writes to ./output are yours and ./input is
+#      readable without loosening anything. This is the default and needs no
+#      host-side commands beyond `mkdir`.
+#
+#   2. Leave PUID/PGID at 1000:1000 and give the host directories to that user:
+#        sudo chown -R 1000:1000 input output
+#
+# Do not use 0 for either. Root would negate cap_drop, no-new-privileges and the
+# read-only root filesystem, and is unnecessary: /data/output inside the image is
+# writable by any uid.
 #
 # ---------------------------------------------------------------------------
 # Exposing this beyond your own machine
@@ -246,9 +274,18 @@ x-pictor-hardening: &pictor-hardening
   mem_limit: 4g
   # Swap capped at the same value so the kernel cannot hide an OOM behind disk.
   memswap_limit: 4g
-  # Redundant with the image's USER, but belt-and-braces: even if the image were
-  # replaced by a root-running one, this forces the unprivileged uid.
-  user: "10001:10001"
+  # The uid:gid the container runs as, set here rather than left to the image so
+  # the process identity matches the owner of the mounted directories. Files
+  # written to ./output then belong to that user instead of to an unrelated
+  # account, and no `chown` on the host is needed.
+  #
+  #   id -u   ->  PUID
+  #   id -g   ->  PGID
+  #
+  # Also redundant with the image's USER, which is what makes this a
+  # belt-and-braces control: even if the image were replaced by a root-running
+  # one, this still forces an unprivileged uid. Never set these to 0.
+  user: "${PUID:-1000}:${PGID:-1000}"
   healthcheck:
     test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8077/healthz', timeout=4).status == 200 else 1)"]
     interval: 30s
@@ -261,8 +298,11 @@ x-pictor-hardening: &pictor-hardening
 # ---------------------------------------------------------------------------
 x-pictor-volumes: &pictor-volumes
   # Where your source images live. Mounted read-only so a compromised server
-  # cannot corrupt or plant files among your originals. Create it first:
-  #   mkdir -p input output && sudo chown 10001:10001 output
+  # cannot corrupt or plant files among your originals. Create both first:
+  #   mkdir -p input output
+  #
+  # No `chown` is needed: the container runs as PUID:PGID (your own identity by
+  # default), so it can already write ./output and read ./input.
   - ./input:/data/input:ro
   # Where results are written, and the only writable path in the container. The
   # server exits at startup with a clear message if it cannot write here, rather

@@ -129,7 +129,7 @@ def _verify_output_writable(root: Path) -> None:
     a container started against a root-owned volume would boot cleanly and then
     fail every single tool call. Failing here turns a confusing runtime error
     into an immediate, actionable one - the usual cause is a host directory
-    owned by the wrong uid.
+    owned by a different uid than the container runs as.
     """
     probe = root / f".pictor-write-probe-{os.getpid()}"
     fd = -1
@@ -137,9 +137,11 @@ def _verify_output_writable(root: Path) -> None:
         fd = os.open(probe, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except OSError as exc:
         raise ConfigError(
-            f"output root {root} is not writable by uid {os.getuid()}: {exc.strerror}. "
-            "In Docker, make sure the mounted host directory is owned by the container "
-            "user (uid 10001)."
+            f"output root {root} is not writable by uid {os.getuid()}, gid {os.getgid()}: "
+            f"{exc.strerror}. In Docker the container user must match the owner of the "
+            "mounted host directory, and there are two ways to arrange that: set PUID and "
+            "PGID in .env to `id -u` and `id -g` so the container adopts your identity, or "
+            "leave PUID/PGID alone and `chown` the host directory to them."
         ) from exc
     finally:
         if fd >= 0:

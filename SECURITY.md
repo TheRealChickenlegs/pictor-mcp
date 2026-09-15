@@ -169,8 +169,21 @@ a pinned internal mirror and is a real downgrade; do not use it on the internet.
 
 The compose file sets `read_only: true`, a 256 MB `/tmp` tmpfs, `cap_drop: ALL`,
 `no-new-privileges`, `pids_limit: 256`, `mem_limit: 4g` and
-`user: "10001:10001"`. The image runs as an unprivileged user with no shell and
-no home directory. The only writable paths are the output volume and the tmpfs.
+`user: "${PUID:-1000}:${PGID:-1000}"`.
+
+The runtime uid is a deployment setting rather than a fixed one, so that files
+written to the mounted output directory belong to the operator instead of to an
+unrelated account. This does not weaken the control: the process is still
+unprivileged either way, and adopting a normal user's identity is in some
+respects stricter than a dedicated uid, since that account already exists and
+owns nothing the container can reach. `PUID=0`/`PGID=0` would defeat
+`cap_drop`, `no-new-privileges` and the read-only root, so neither is ever
+defaulted to root and both are documented as off-limits.
+
+The image's own default identity is an unprivileged user with no shell and no
+home directory, and `/data/output` is mode `1777` so that any uid may write it —
+a mode restricted to the image's uid would make the configurable identity fail
+at startup. The only writable paths are the output volume and the tmpfs.
 
 The image ships **no credentials**, so publishing it leaks nothing.
 
@@ -251,4 +264,6 @@ Being explicit about these is more useful than implying they do not exist.
 - [ ] `PICTOR_MAX_CONCURRENCY` × `PICTOR_MAX_PIXELS` consistent with `mem_limit`.
 - [ ] Container hardening intact (`read_only`, `cap_drop`, `no-new-privileges`,
       non-root user).
+- [ ] `PUID`/`PGID` set to your own `id -u`/`id -g`, or the host directories
+      `chown`ed to match — and neither left at `0`.
 - [ ] Backups or retention: the output volume grows without bound.

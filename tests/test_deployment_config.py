@@ -14,6 +14,7 @@ caught here rather than at deploy time.
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -56,7 +57,17 @@ _INTERPOLATION = re.compile(r"\$\{([A-Z0-9_]+)(?::-([^}]*))?\}")
 #: Variables consumed by Compose itself rather than by the server. They
 #: deliberately have no PICTOR_ prefix so they cannot be confused with (or
 #: accidentally documented as) server settings.
-COMPOSE_ONLY_VARS = frozenset({"IMAGE_REPO", "IMAGE_TAG", "IMAGE_TAG_GPU", "IMAGE_TAG_ML", "BIND_ADDRESS"})
+COMPOSE_ONLY_VARS = frozenset(
+    {
+        "IMAGE_REPO",
+        "IMAGE_TAG",
+        "IMAGE_TAG_GPU",
+        "IMAGE_TAG_ML",
+        "BIND_ADDRESS",
+        "PUID",
+        "PGID",
+    }
+)
 
 #: Variables consumed by a bundled third-party library rather than by this
 #: project: rembg resolves its model directory from U2NET_HOME.
@@ -292,7 +303,9 @@ class TestComposeConfiguration:
         assert service["read_only"] is True
         assert service["cap_drop"] == ["ALL"]
         assert "no-new-privileges:true" in service["security_opt"]
-        assert service["user"] == "10001:10001"
+        # Not a literal: the container identity is a deployment choice so that
+        # files in ./output belong to the operator rather than a stranger.
+        assert service["user"].startswith("${PUID"), service["user"]
         assert service["tmpfs"], "a read-only root needs a writable /tmp"
         assert service["pids_limit"] and service["mem_limit"]
         assert service["healthcheck"]["test"]
@@ -316,6 +329,46 @@ class TestComposeConfiguration:
         assert not (HARDENING_KEYS & set(service)), (
             f"{path.name} redefines hardening keys: {sorted(HARDENING_KEYS & set(service))}"
         )
+
+    @pytest.mark.parametrize(
+        ("puid", "pgid"),
+        [("1000", "1000"), ("1001", "1001"), ("1000", "100")],
+    )
+    def test_the_container_runs_as_the_configured_uid_and_gid(
+        self, puid: str, pgid: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Files in ./output must belong to the operator, not to an unrelated uid."""
+        monkeypatch.setenv("PUID", puid)
+        monkeypatch.setenv("PGID", pgid)
+        # Compose resolves ${VAR} from the environment before the container sees
+        # it, so this asserts the value an operator would actually get.
+        resolved = re.sub(
+            r"\$\{([A-Z0-9_]+)(?::-([^}]*))?\}",
+            lambda m: os.environ.get(m.group(1), m.group(2) or ""),
+            _load(BASE_COMPOSE)["services"][SERVICE]["user"],
+        )
+        assert resolved == f"{puid}:{pgid}"
+
+    def test_the_default_identity_is_unprivileged(self) -> None:
+        """Root would negate cap_drop, no-new-privileges and the read-only root."""
+        default = re.search(r"\$\{PUID:-([^}]*)\}", _load(BASE_COMPOSE)["services"][SERVICE]["user"])
+        assert default, "user is not configurable"
+        assert default.group(1) not in {"", "0"}, default.group(1)
+        gid = re.search(r"\$\{PGID:-([^}]*)\}", _load(BASE_COMPOSE)["services"][SERVICE]["user"])
+        assert gid and gid.group(1) not in {"", "0"}
+
+    @pytest.mark.parametrize("path", [BASE_COMPOSE, GPU_OVERLAY, ML_OVERLAY], ids=lambda p: p.name)
+    def test_no_service_hardcodes_a_runtime_uid(self, path: Path) -> None:
+        """A literal here is what made the container and the host disagree."""
+        service = _load(path)["services"][SERVICE]
+        for key in ("user",):
+            if key in service:
+                assert "${PUID" in str(service[key]), f"{path.name}: {service[key]}"
+
+    def test_the_image_output_directory_is_writable_by_any_uid(self) -> None:
+        """The image must not assume its own uid, since compose overrides it."""
+        text = DOCKERFILE.read_text()
+        assert re.search(r"chmod 1?777 /data/output", text), "output dir is uid-specific"
 
     def test_ports_are_loopback_only_by_default(self) -> None:
         """The default deployment must not be reachable off-host."""
@@ -515,6 +568,18 @@ class TestDockerfile:
 
     def test_oci_source_label_is_the_real_repository(self) -> None:
         assert "TheRealChickenlegs/pictor-mcp" in DOCKERFILE.read_text()
+
+    def test_the_permission_error_names_both_remedies(self) -> None:
+        """The message is the whole fix for the most common setup problem.
+
+        It must name the variables to set and the alternative, and it must not
+        hardcode the image's own uid - that is exactly the value an operator has
+        overridden.
+        """
+        source = (ROOT / "src" / "pictor_mcp" / "server.py").read_text()
+        assert "PUID" in source and "PGID" in source
+        assert "chown" in source
+        assert "10001" not in source
 
 
 class TestDockerignore:

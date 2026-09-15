@@ -83,15 +83,27 @@ COPY src/ ./src/
 # resolves exactly as it does from a checkout.
 RUN pip install --no-cache-dir .
 
-# Data layout. /data/input is root-owned and world-readable, so the unprivileged
-# service cannot rewrite its own inputs. /data/output is owned by pictor with
-# 0750, because paths.PathJail performs every write there and nowhere else (its
-# atomic-write temp file is created in the destination directory, not /tmp).
+# Data layout.
+#
+# /data/input is root-owned and world-readable, so the service cannot rewrite its
+# own inputs.
+#
+# /data/output is deliberately writable by *any* uid (1777, the /tmp convention:
+# anyone may create files, only the owner may remove them). The image's own user
+# is `pictor` (10001), but operators routinely run the container as their own
+# uid so that files land in ./output owned by them rather than by a stranger -
+# docker-compose.yml does exactly that via PUID/PGID. A mode that only admitted
+# 10001 would make that fail at startup, and with a bind mount the host
+# directory's permissions govern anyway. The sticky bit keeps the two cases
+# consistent rather than merely permissive.
+#
+# paths.PathJail performs every write here and nowhere else: its atomic-write
+# temp file is created in the destination directory, not /tmp.
 RUN mkdir -p /data/input /data/output \
     && chown -R root:root /data/input \
     && chmod 0755 /data/input \
-    && chown -R pictor:pictor /data/output \
-    && chmod 0750 /data/output
+    && chown -R root:root /data/output \
+    && chmod 1777 /data/output
 
 # Defaults bind all interfaces *inside* the container, which is the only way the
 # published port can reach it. Real reachability is decided by the compose port
@@ -109,6 +121,10 @@ ENV PICTOR_TRANSPORT=streamable-http \
 ENV HOME=/tmp \
     NUMBA_CACHE_DIR=/tmp
 
+# The image's default identity. Non-root, with no shell and no home directory.
+# Operators who want output files owned by their own host user override this with
+# `user:` in compose (see PUID/PGID in .env.example); the /data/output mode above
+# is what makes that work.
 USER pictor
 
 EXPOSE 8077

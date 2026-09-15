@@ -8,7 +8,7 @@ crop, rotate, watermark, background-remove and batch-process images — and veri
 its own edits afterwards.
 
 ```bash
-mkdir -p input output && sudo chown 10001:10001 output
+mkdir -p input output
 cp .env.example .env            # set PICTOR_AUTH_TOKEN
 docker compose up -d            # pulls the published image; nothing is built
 ```
@@ -21,6 +21,9 @@ The server is then at `http://127.0.0.1:8077/mcp`.
 
 - [Why this one](#why-this-one)
 - [Quick start](#quick-start)
+  - [File ownership](#file-ownership)
+  - [Which compose file](#which-compose-file)
+  - [Pinning a version](#pinning-a-version)
 - [Client setup](#client-setup)
   - [DeepSeek Harness (DSH)](#deepseek-harness-dsh)
   - [OpenCode](#opencode)
@@ -73,10 +76,10 @@ git clone https://github.com/TheRealChickenlegs/pictor-mcp.git
 cd pictor-mcp
 
 mkdir -p input output
-sudo chown 10001:10001 output   # the container runs as uid 10001
 cp .env.example .env
 openssl rand -hex 32            # paste into PICTOR_AUTH_TOKEN in .env
 
+# If your uid or gid is not 1000, put your own in .env (see below)
 docker compose up -d
 ```
 
@@ -94,6 +97,39 @@ Put images in `./input`, and the server writes results to `./output`.
 The default port mapping is `127.0.0.1:8077:8077`, so **nothing off-host can
 reach it**. To expose it on your LAN, see
 [Exposing beyond localhost](#exposing-beyond-localhost).
+
+### File ownership
+
+The container runs as `PUID:PGID`, set in `.env` and defaulting to `1000:1000`.
+Point them at your own identity and everything the server writes to `./output`
+belongs to you, and `./input` is readable without loosening anything:
+
+```bash
+id -u    # e.g. 1000  ->  PUID
+id -g    # e.g. 1000  ->  PGID
+```
+
+That is why the quick start above needs no `chown`. If you would rather not
+change the container's identity, the other direction works too:
+
+```bash
+sudo chown -R 1000:1000 input output    # match the container's default
+```
+
+Getting this wrong is the one setup error you are likely to hit, and it is
+deliberately loud rather than silent — the server refuses to start rather than
+booting and failing every call:
+
+```
+configuration error: output root /data/output is not writable by uid 1000,
+gid 1000: Permission denied. In Docker the container user must match the owner
+of the mounted host directory ...
+```
+
+Do **not** set `PUID` or `PGID` to `0`. Running as root would negate
+`cap_drop`, `no-new-privileges` and the read-only root filesystem, and it is
+unnecessary: `/data/output` inside the image is writable by any uid precisely so
+that this choice is free.
 
 ### Which compose file
 
@@ -257,11 +293,16 @@ Or with Docker:
 
 ```bash
 docker run -i --rm \
+  --user "$(id -u):$(id -g)" \
   -v /path/to/images:/data/input:ro \
   -v /path/to/out:/data/output \
   -e PICTOR_TRANSPORT=stdio \
-  pictor-mcp:latest
+  ghcr.io/therealchickenlegs/pictor-mcp:latest
 ```
+
+`--user` is what `docker compose` sets from `PUID`/`PGID`; without it the
+container uses the image's own uid, and `/path/to/out` would need to be writable
+by that account instead. See [File ownership](#file-ownership).
 
 ---
 
@@ -469,7 +510,7 @@ Read [SECURITY.md](SECURITY.md) for the full threat model. The short version:
 | Metadata leakage | EXIF, GPS and ICC stripped by default. |
 | Stored XSS via output files | Served content types are allow-listed to images; anything else is an opaque attachment, every response carries a sandbox CSP, and `output_name` cannot choose its own extension. |
 | Unbounded intermediate allocation | `cover`/`outside` resizes and saliency thumbnails bound the *scaled* bitmap, not just the result; `image_compare` processes in strips so memory is independent of image size. |
-| Container breakout | Non-root (uid 10001), read-only root filesystem, all capabilities dropped, `no-new-privileges`, PID and memory limits. |
+| Container breakout | Non-root runtime (`PUID:PGID`, default `1000:1000`, never `0`), read-only root filesystem, all capabilities dropped, `no-new-privileges`, PID and memory limits. |
 | Resource exhaustion | Concurrency cap, per-call timeouts, request body cap, batch limits. |
 | Secret leakage in logs | Startup secrets are redacted; stdout is never used for logging (it is the stdio protocol channel). |
 
@@ -576,6 +617,7 @@ options:
 | `IMAGE_TAG_GPU` | `gpu` | CUDA image tag, e.g. `1.0.0-gpu`. |
 | `IMAGE_TAG_ML` | `ml` | ML image tag, e.g. `1.0.0-ml`. |
 | `BIND_ADDRESS` | `127.0.0.1` | Host interface the port binds to. `0.0.0.0` for LAN. |
+| `PUID` / `PGID` | `1000` / `1000` | uid:gid the container runs as. Set to `id -u` / `id -g` so `./output` files are yours. Never `0`. |
 
 ---
 
