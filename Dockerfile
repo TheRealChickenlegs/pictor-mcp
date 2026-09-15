@@ -158,27 +158,36 @@ ENTRYPOINT ["python", "-m", "pictor_mcp"]
 #
 # Two build arguments instead of one hard pin:
 #
-#   TORCH_INDEX_URL  which CUDA build to install. cu126 is the default because it
-#                    is the 12.x index carrying wheels for every interpreter the
-#                    base image might use, 3.14 included. Newer indexes are not
-#                    automatically better: an index only helps if the host driver
-#                    is new enough, and cu128/cu129 carry fewer torch versions.
+#   TORCH_INDEX_URL  which CUDA build to install. cu128 is the default: it is the
+#                    first CUDA line with Blackwell kernels (sm_120, the RTX 50
+#                    series), it still covers Turing through Hopper, and it
+#                    publishes wheels for every interpreter the base might use,
+#                    3.14 included. cu126 is NOT a viable default despite being
+#                    older and therefore driver-friendlier - CUDA 12.6 predates
+#                    Blackwell entirely, so a 50-series card would load torch and
+#                    then fail every kernel launch.
 #   TORCH_VERSION    empty means "the newest build on that index for this
 #                    interpreter", which cannot go stale. Set it to pin exactly,
 #                    for a reproducible image.
 #
 # Check the pairing before changing either:
 #
-#   curl -s https://download.pytorch.org/whl/cu126/torch/ | grep -o 'cp3[0-9]*' | sort -u
+#   curl -s https://download.pytorch.org/whl/cu128/torch/ | grep -o 'cp3[0-9]*' | sort -u
 #
-# If your driver is too old for a 12.x CUDA build, pin an older index *and* a
-# base image whose Python that index still publishes wheels for.
+# The GPU's compute capability must also be in the chosen build's kernel list.
+# The server reports this at startup when it is not, naming the capability and
+# the architectures the build does support, so the mismatch is diagnosable
+# without reading NVIDIA's documentation.
+#
+# If your driver is too old for a 12.8 CUDA build, pin an older index *and* a
+# base image whose Python that index still publishes wheels for; note that
+# anything below cu128 cannot drive a Blackwell card at all.
 #
 # The CPU image - the default target - never touches the CUDA index.
 # =============================================================================
 FROM base AS gpu
 
-ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu126
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128
 ARG TORCH_VERSION=
 
 # The base stage ends as the unprivileged `pictor` user; installation needs root.

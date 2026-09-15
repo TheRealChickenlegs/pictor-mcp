@@ -38,6 +38,6 @@ services:
       # (the default) to take the newest build the index publishes for the base
       # image's Python; set it only to pin an exact version.
       # args:
-      #   TORCH_INDEX_URL: "https://download.pytorch.org/whl/cu126"
+      #   TORCH_INDEX_URL: "https://download.pytorch.org/whl/cu129"
       #   TORCH_VERSION: "2.14.0"
     image: pictor-mcp:local

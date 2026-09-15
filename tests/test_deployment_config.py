@@ -644,6 +644,21 @@ class TestDockerfile:
         assert match, "TORCH_INDEX_URL is no longer a build argument"
         assert match.group(1).startswith("https://download.pytorch.org/whl/")
 
+    def test_the_default_cuda_index_can_drive_modern_cards(self) -> None:
+        """The default must be a CUDA line that includes Blackwell kernels.
+
+        cu126 installs cleanly and is friendlier to old drivers, which is what
+        made it look like the safe choice - but CUDA 12.6 predates Blackwell, so
+        on an RTX 50-series card it loads, reports the GPU as available, and then
+        fails every kernel launch. 12.8 is the first line with sm_120 kernels.
+        """
+        match = re.search(r"^ARG TORCH_INDEX_URL=(\S+)$", DOCKERFILE.read_text(), re.MULTILINE)
+        assert match
+        tag = match.group(1).rstrip("/").rsplit("/", 1)[-1]
+        assert re.fullmatch(r"cu\d+", tag), tag
+        minor = int(tag[2:])
+        assert minor >= 128, f"CUDA {tag} predates Blackwell (needs cu128 or newer)"
+
     def test_no_comment_sits_inside_a_line_continuation(self) -> None:
         """A comment inside a continuation is stripped by Docker, but it is a
         documented gotcha and reads as if it were part of the command."""

@@ -209,8 +209,10 @@ metadata: they change the pixels, and stripping them would corrupt output.
 - `TORCH_INDEX_URL` selects the CUDA build and `TORCH_VERSION` optionally pins
   it; both are build arguments. The version is unpinned by default because a hard
   pin goes stale against a moving base image: `torch==2.4.1` stopped resolving
-  the moment the base moved from Python 3.12 to 3.14, since the cu124 index
-  carries no cp314 wheels at all.
+  the moment the base moved from Python 3.12 to 3.14, since the index it named
+  carries no cp314 wheels at all. The default index is also chosen for hardware
+  coverage, not only for wheels: `cu126` predates Blackwell, so it would install
+  cleanly on an RTX 50-series card and then fail every kernel launch.
 - The build context is minimal (`.dockerignore`), so no secret, test fixture or
   host file can reach a layer.
 - The MCP SDK's own transport-security default is **DNS-rebinding protection

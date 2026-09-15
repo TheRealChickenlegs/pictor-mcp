@@ -408,3 +408,100 @@ class TestEncodeFallbackStillWorks:
         array = np.random.default_rng(3).integers(0, 256, (256, 256, 3), dtype=np.uint8)
         encoded = encode(Image.fromarray(array, "RGB"), resolve_output_format("jpeg"), EncodeOptions(quality=95))
         assert encoded.data.startswith(b"\xff\xd8")
+
+
+class TestGpuArchitectureDiagnosis:
+    """The GPU backend must explain an architecture mismatch, not just fail.
+
+    A PyTorch build only carries kernels for the compute capabilities it was
+    compiled for. When the card is newer than the build - an RTX 50-series
+    (sm_120) against a pre-CUDA-12.8 wheel - torch imports, sees the device, and
+    fails at the first kernel launch. Torch's own warning lists the capabilities
+    it supports but not what to do, and the backend only added "the self-test
+    could not run a GPU resize", which names neither the card nor the cause.
+    """
+
+    @staticmethod
+    def _backend(major: int, minor: int, archs: list[str], detail: str = "RTX 5060 Ti"):
+        import types
+
+        from pictor_mcp.backends.torch_cuda import TorchCudaBackend
+
+        cuda = types.SimpleNamespace(
+            is_available=lambda: True,
+            device_count=lambda: 1,
+            get_device_name=lambda index=0: "NVIDIA GeForce RTX 5060 Ti",
+            get_device_capability=lambda index=0: (major, minor),
+            get_arch_list=lambda: archs,
+            empty_cache=lambda: None,
+        )
+        torch = types.SimpleNamespace(cuda=cuda, __version__="2.4.1", version=types.SimpleNamespace(cuda="12.4"))
+        backend = TorchCudaBackend.__new__(TorchCudaBackend)  # skip __init__, which imports torch
+        backend._torch = torch
+        backend._device_index = 0
+        backend._device = "cuda:0"
+        backend._detail = detail
+        backend._available = False
+        backend._disabled_reason = ""
+        return backend
+
+    @pytest.mark.parametrize(
+        ("tag", "expected"),
+        [
+            ("sm_50", (5, 0)),
+            ("sm_75", (7, 5)),
+            ("sm_86", (8, 6)),
+            ("sm_90", (9, 0)),
+            ("sm_90a", (9, 0)),
+            ("sm_100", (10, 0)),
+            ("sm_120", (12, 0)),
+            ("sm_120a", (12, 0)),
+            ("compute_120", (12, 0)),
+            ("not-an-arch", None),
+        ],
+    )
+    def test_arch_tags_parse(self, tag: str, expected: tuple[int, int] | None) -> None:
+        from pictor_mcp.backends.torch_cuda import _capability
+
+        assert _capability(tag) == expected
+
+    def test_a_card_newer_than_the_build_advises_a_newer_cuda_line(self) -> None:
+        """The reported case: RTX 5060 Ti sm_120 against a cu124-era build."""
+        backend = self._backend(12, 0, ["sm_50", "sm_60", "sm_70", "sm_75", "sm_80", "sm_86", "sm_90"])
+        reason = backend._unsupported_architecture()
+        assert reason
+        assert "sm_120" in reason
+        assert "sm_90" in reason, "the capabilities the build does support"
+        assert "predates" in reason
+        assert "cu128" in reason, "the remedy must name the index to use"
+
+    def test_a_card_older_than_the_build_advises_an_older_cuda_line(self) -> None:
+        """The opposite direction: advising 'newer' here would make it worse."""
+        backend = self._backend(7, 5, ["sm_80", "sm_86", "sm_90", "sm_120"])
+        reason = backend._unsupported_architecture()
+        assert "no longer includes" in reason
+        assert "cu126" in reason
+
+    @pytest.mark.parametrize(
+        "archs",
+        [
+            ["sm_75", "sm_80", "sm_86", "sm_90", "sm_100", "sm_120"],
+            ["sm_90", "sm_120a"],
+            ["sm_90", "compute_120"],
+        ],
+    )
+    def test_a_supported_architecture_reports_nothing(self, archs: list[str]) -> None:
+        """Including the arch-specific and PTX-only spellings of coverage."""
+        assert self._backend(12, 0, archs)._unsupported_architecture() == ""
+
+    def test_an_unreadable_arch_list_is_not_treated_as_a_mismatch(self) -> None:
+        """A driver that cannot answer must not disable a working GPU."""
+        assert self._backend(12, 0, [])._unsupported_architecture() == ""
+
+    def test_the_reason_reaches_the_capabilities_report(self) -> None:
+        """The operator has to be able to find this without reading logs."""
+        backend = self._backend(12, 0, ["sm_80", "sm_90"])
+        backend._disabled_reason = backend._unsupported_architecture()
+        status = backend.status()
+        assert status.available is False
+        assert "sm_120" in status.to_public_dict()["disabledReason"]

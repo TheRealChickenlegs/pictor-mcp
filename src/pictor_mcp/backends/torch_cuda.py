@@ -25,6 +25,7 @@ so a broken kernel or a bad driver cannot quietly corrupt output.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 
 import numpy as np
@@ -49,6 +50,24 @@ _TORCH_MODES = {
 
 #: Pillow modes with a straight channel mapping.
 _SUPPORTED_MODES = {"L": 1, "LA": 2, "RGB": 3, "RGBA": 4}
+
+
+def _capability(tag: str) -> tuple[int, int] | None:
+    """``(major, minor)`` for an arch tag, or None if it is not one.
+
+    Handles every form PyTorch emits: ``sm_90``, ``sm_120``, the arch-specific
+    ``sm_120a``, and the PTX ``compute_120``. Tuples compare in the right order,
+    so ``(12, 0) > (9, 0)`` without any packing arithmetic.
+    """
+    match = re.match(r"(?:sm|compute)_(\d+)", tag.strip().lower())
+    if not match:
+        return None
+    digits = match.group(1)
+    if len(digits) >= 3:
+        return int(digits[:-1]), int(digits[-1])
+    if len(digits) == 2:
+        return int(digits[0]), int(digits[1])
+    return int(digits), 0
 
 
 class TorchCudaBackend:
@@ -84,11 +103,79 @@ class TorchCudaBackend:
             self._device = f"cuda:{self._device_index}"
             name = torch.cuda.get_device_name(self._device_index)
             self._detail = f"{name} (torch {torch.__version__}, cuda {torch.version.cuda})"
+
+            # Check the architecture before the self-test, because the self-test
+            # can only say "the resize did not run" - it cannot say why, and the
+            # usual reason is the most confusing one: torch is installed
+            # correctly, sees the card, and is simply not built for it.
+            unsupported = self._unsupported_architecture()
+            if unsupported:
+                self._disabled_reason = unsupported
+                logger.warning("GPU acceleration unavailable: %s", unsupported)
+                return
+
             self._run_self_test()
             self._available = True
         except Exception as exc:  # pragma: no cover - driver-dependent
             self._disabled_reason = f"initialisation failed: {type(exc).__name__}"
             logger.warning("CUDA backend disabled: %s", exc, exc_info=True)
+
+    def _unsupported_architecture(self) -> str:
+        """Explain an architecture mismatch, or return an empty string.
+
+        A PyTorch build only contains kernels for the compute capabilities it was
+        compiled for. When the installed card is newer than the build - an RTX 50
+        series (sm_120) against a pre-CUDA-12.8 wheel, say - torch imports, sees
+        the device, and *then* fails at the first kernel launch. Torch's own
+        warning says the capabilities it supports but not what to do about it,
+        and the failure surfaces here as an opaque "resize did not run".
+
+        Comparing the two lists turns that into a message naming the card, the
+        capability, what the build does support, and the fix.
+        """
+        torch = self._torch
+        try:
+            major, minor = torch.cuda.get_device_capability(self._device_index)
+            arch_list = list(torch.cuda.get_arch_list())
+        except Exception:  # pragma: no cover - driver-dependent
+            return ""
+
+        if not arch_list:
+            return ""
+
+        wanted = f"sm_{major}{minor}"
+        tags = {entry.strip().lower() for entry in arch_list}
+        supported = {cap for tag in tags if (cap := _capability(tag)) is not None}
+        if (major, minor) in supported:
+            return ""
+
+        name = self._detail or "the installed GPU"
+        ordered = sorted(supported)
+
+        # Direction matters. A card newer than everything in the list means the
+        # build predates the hardware; a card older than everything in the list
+        # means the build dropped that architecture. Advising the wrong direction
+        # sends the operator to change the one thing that will not help.
+        if ordered and (major, minor) > ordered[-1]:
+            remedy = (
+                "This build predates that architecture. Rebuild with a CUDA 12.8 or "
+                "newer wheel index - TORCH_INDEX_URL="
+                "https://download.pytorch.org/whl/cu128 is the image default - and "
+                "leave TORCH_VERSION empty so it resolves for the base image's Python."
+            )
+        elif ordered and (major, minor) < ordered[0]:
+            remedy = (
+                "This build no longer includes that architecture. Rebuild with an "
+                "older CUDA line, e.g. TORCH_INDEX_URL="
+                "https://download.pytorch.org/whl/cu126, and expect to pair it with "
+                "an older base image if no wheel exists for the current Python."
+            )
+        else:
+            remedy = "Rebuild with a wheel index whose kernels cover this card; TORCH_INDEX_URL selects it."
+        return (
+            f"{name} is {wanted}, which this PyTorch build has no kernels for; "
+            f"it supports {', '.join(sorted(tags))}. {remedy}"
+        )
 
     def _run_self_test(self) -> None:
         """Verify GPU and CPU resampling agree before trusting the GPU.

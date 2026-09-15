@@ -436,6 +436,34 @@ docker run --rm --gpus all nvidia/cuda:12.6.0-base-ubuntu22.04 nvidia-smi
 The GPU tags are `:gpu` and `:<version>-gpu`; the overlay selects them for you,
 and `IMAGE_TAG_GPU` pins an exact one.
 
+**The CUDA line must cover your card's architecture.** The image installs a
+CUDA 12.8 build (`cu128`), which carries kernels for Turing through Blackwell
+(RTX 50-series). A card newer than the build will load, appear available, and
+then fail every kernel launch. The server detects this at startup, disables the
+GPU, and says so in plain terms:
+
+```
+GPU acceleration unavailable: RTX 5060 Ti (torch ..., cuda ...) is sm_120, which
+this PyTorch build has no kernels for; it supports sm_50, ..., sm_90. This build
+predates that architecture. Rebuild with a CUDA 12.8 or newer wheel index ...
+```
+
+The same text appears in `image_capabilities`, so an agent can report it. To
+change it, override the index at build time — and note the coupling, since an
+index only helps if it still publishes wheels for the base image's Python:
+
+```yaml
+build:
+  args:
+    TORCH_INDEX_URL: "https://download.pytorch.org/whl/cu129"
+```
+
+Check a pairing before committing to it:
+
+```bash
+curl -s https://download.pytorch.org/whl/cu128/torch/ | grep -o 'cp3[0-9]*' | sort -u
+```
+
 What actually speeds up, and what does not:
 
 - **Resampling** (resize) runs on the GPU via `torch.nn.functional.interpolate`.
