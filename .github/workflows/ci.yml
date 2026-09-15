@@ -1,0 +1,163 @@
+name: CI
+
+# Checks only: lint, tests, packaging and the deployment contract. Nothing here
+# publishes anything, so it is safe to run on every branch and pull request.
+#
+# Image builds live in publish.yml; security analysis in codeql.yml.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+# Least privilege: no job here needs to write to the repository.
+permissions:
+  contents: read
+
+# Superseded runs on the same ref are cancelled, so a rapid push sequence does
+# not queue work nobody will read.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  lint:
+    name: Lint, format and syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install ruff
+        run: python -m pip install --upgrade "ruff>=0.6"
+
+      - name: Ruff lint
+        # Ruff parses every file, so a syntax error is reported here before the
+        # test job even starts. The GitHub output format gives inline annotations.
+        run: ruff check --output-format=github src tests scripts
+
+      - name: Ruff format check
+        run: ruff format --check --diff src tests scripts
+
+      - name: Byte-compile every module
+        run: python -m compileall -q -f src tests scripts
+
+  workflows:
+    name: Lint the workflows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # actionlint validates the workflow YAML itself: expression syntax, the
+      # contexts a step or job may reference, and action input names. Its image
+      # bundles shellcheck and pyflakes, so the embedded shell and Python are
+      # checked too - which is the part most likely to rot unnoticed.
+      - name: actionlint
+        uses: docker://rhysd/actionlint:1.7.7
+        with:
+          args: -color
+
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The declared floor (requires-python >=3.10), the version the image
+        # ships (3.12), and the newest the MCP SDK supports. The matrix is also
+        # what catches syntax that is valid on one interpreter but not another.
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install a font
+        # The text-watermark tests want a real font. The suite degrades to
+        # Pillow's built-in font if none is present, but installing one keeps
+        # the assertion meaningful instead of silently weaker.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends fonts-dejavu-core
+
+      - name: Install the package and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Run the test suite
+        run: python -m pytest tests -q -p no:cacheprovider
+
+  package:
+    name: Build and install the distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+
+      - name: Install the wheel into a clean environment
+        # Proves the shipped artefact is self-contained: the wheel is installed
+        # into a fresh venv with no source tree on the path, and both the
+        # console script and `python -m` must work.
+        run: |
+          python -m venv /tmp/verify
+          /tmp/verify/bin/pip install --upgrade pip
+          /tmp/verify/bin/pip install dist/*.whl
+          /tmp/verify/bin/pictor-mcp --version
+          /tmp/verify/bin/python -m pictor_mcp --version
+
+      - name: Smoke-test the installed server over stdio
+        run: /tmp/verify/bin/python scripts/smoke_stdio.py --expect-tools 14
+
+      - name: Check the container entry point resolves
+        # The image runs `python -m pictor_mcp`, so confirm the module is
+        # importable from the installed wheel alone.
+        run: /tmp/verify/bin/python -c "import pictor_mcp, pictor_mcp.server; print(pictor_mcp.__version__)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  deployment:
+    name: Deployment files
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install PyYAML
+        run: python -m pip install --upgrade "pyyaml>=6.0"
+
+      - name: Validate compose files, Image stages and settings coverage
+        # These tests parse docker-compose.yml, the GPU overlay and .env.example
+        # and push the result through the real config parser, so a renamed
+        # setting, a lost hardening flag or a forward-referenced build stage
+        # fails here rather than at deploy time.
+        run: python -m pytest tests/test_deployment_config.py -q -p no:cacheprovider

@@ -1,0 +1,35 @@
+version: 2
+updates:
+  # Keep the workflow actions current: a stale action is a supply-chain risk,
+  # since it runs with repository credentials.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "ci"
+    labels: ["dependencies", "ci"]
+
+  # Python dependencies. Grouped so a routine bump is one reviewable pull
+  # request rather than a dozen.
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "build"
+    labels: ["dependencies"]
+    groups:
+      python-dependencies:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # Base-image and Dockerfile updates.
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "build"
+    labels: ["dependencies", "docker"]
