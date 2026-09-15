@@ -35,7 +35,7 @@
 # =============================================================================
 # base - the CPU image. This is what `docker build .` produces, via `default`.
 # =============================================================================
-FROM python:3.12-slim AS base
+FROM python:3.14-slim AS base
 
 LABEL org.opencontainers.image.title="pictor-mcp" \
       org.opencontainers.image.description="Secure MCP server for image operations: convert, resize, compress, crop, watermark, batch and more." \
