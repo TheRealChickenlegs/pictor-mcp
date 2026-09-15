@@ -83,6 +83,9 @@ class TorchCudaBackend:
         self._available = False
         self._detail = ""
         self._disabled_reason = ""
+        #: Why the last resize attempt failed, so the self-test can report a
+        #: cause rather than only that nothing ran.
+        self._last_error = ""
         self._load()
 
     # ------------------------------------------------------------- lifecycle
@@ -104,6 +107,15 @@ class TorchCudaBackend:
             name = torch.cuda.get_device_name(self._device_index)
             self._detail = f"{name} (torch {torch.__version__}, cuda {torch.version.cuda})"
 
+            # torch is importable and a CUDA device is present, so the backend is
+            # usable *in principle*. This is set before the checks below rather
+            # than after, because resize() refuses to touch the device unless
+            # available() is true - and the self-test resizes. Setting it last
+            # meant the self-test always found the backend unavailable, gave up
+            # with "could not run a GPU resize", and disabled itself: the GPU path
+            # was dead code on every machine, working card or not.
+            self._available = True
+
             # Check the architecture before the self-test, because the self-test
             # can only say "the resize did not run" - it cannot say why, and the
             # usual reason is the most confusing one: torch is installed
@@ -115,7 +127,6 @@ class TorchCudaBackend:
                 return
 
             self._run_self_test()
-            self._available = True
         except Exception as exc:  # pragma: no cover - driver-dependent
             self._disabled_reason = f"initialisation failed: {type(exc).__name__}"
             logger.warning("CUDA backend disabled: %s", exc, exc_info=True)
@@ -191,7 +202,8 @@ class TorchCudaBackend:
         cpu_result = np.asarray(reference_source.resize(target, Image.Resampling.BILINEAR), dtype=np.float32)
         gpu_image = self.resize(reference_source, target, Image.Resampling.BILINEAR)
         if gpu_image is None:
-            self._disabled_reason = "self-test could not run a GPU resize"
+            cause = f": {self._last_error}" if self._last_error else ""
+            self._disabled_reason = f"self-test could not run a GPU resize{cause}"
             return
         gpu_result = np.asarray(gpu_image, dtype=np.float32)
 
@@ -253,16 +265,26 @@ class TorchCudaBackend:
             # Never let an accelerator failure surface as a tool error: the CPU
             # path can always produce the answer.
             if type(exc).__name__ == "OutOfMemoryError":
+                self._last_error = "the device ran out of memory"
                 logger.warning("CUDA out of memory during resize; falling back to CPU")
                 self._empty_cache()
             else:
+                self._last_error = f"{type(exc).__name__}: {exc}"
                 logger.warning("CUDA resize failed (%s); falling back to CPU", exc)
             return None
 
         if result.ndim == 2:
             return Image.fromarray(result, "L")
+
         channels = result.shape[2]
-        mode_name = {1: "L", 2: "LA", 3: "RGB", 4: "RGBA"}.get(channels)
+        if channels == 1:
+            # The permute above always yields (H, W, C), so a grayscale result
+            # arrives as (H, W, 1) - which Pillow rejects for mode "L". Without
+            # this the GPU path raised on every single-channel image and fell
+            # back to the CPU, so grayscale was never actually accelerated.
+            return Image.fromarray(result[:, :, 0], "L")
+
+        mode_name = {2: "LA", 3: "RGB", 4: "RGBA"}.get(channels)
         if mode_name is None:  # pragma: no cover - guarded by _SUPPORTED_MODES
             return None
         return Image.fromarray(result, mode_name)

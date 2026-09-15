@@ -39,9 +39,16 @@ def build_registry(config: Config) -> BackendRegistry:
         if status.available:
             backends.append(cuda)
             logger.info("GPU acceleration enabled: %s", status.detail)
+        elif status.disabled_reason:
+            # A device was found and then rejected. That is a real problem the
+            # operator wants to fix, not a fact about the machine, so it is a
+            # warning rather than a note - the server runs correctly without it,
+            # but it is not running the way it was configured to.
+            logger.warning("GPU acceleration unavailable: %s", status.disabled_reason)
         else:
-            reason = status.disabled_reason or status.detail or "unavailable"
-            logger.info("GPU acceleration unavailable: %s", reason)
+            # No GPU here, or torch is not installed. Informational: this is the
+            # expected state for the CPU image.
+            logger.info("GPU acceleration unavailable: %s", status.detail or "unavailable")
 
     statuses.append(
         BackendStatus(
