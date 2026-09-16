@@ -61,6 +61,18 @@ jobs:
       - name: Byte-compile every module
         run: python -m compileall -q -f src tests scripts
 
+      - name: Parse the shell scripts
+        # The build and Portainer scripts are bash, and a syntax error in one
+        # should fail here rather than in the job that needed it. Behaviour is
+        # not covered by this: the scripts are written to be exercised through
+        # `--print-command`, which tests/test_local_build.py drives without a
+        # Docker daemon.
+        run: |
+          for script in scripts/*.sh; do
+            echo "bash -n $script"
+            bash -n "$script"
+          done
+
   workflows:
     name: Lint the workflows
     runs-on: ubuntu-latest
@@ -183,4 +195,12 @@ jobs:
         # lost hardening flag or a forward-referenced build stage fails here
         # rather than at deploy time. They are static file checks, so one
         # interpreter is enough - the version matrix does not need to repeat them.
-        run: python -m pytest tests/test_deployment_config.py -q -p no:cacheprovider
+        #
+        # test_local_build.py is the same kind of check for the local-build path:
+        # the GitLab pipeline, the Makefile, the build/Portainer scripts and the
+        # Dockerfile's layer order, all without a Docker daemon.
+        run: |
+          python -m pytest \
+            tests/test_deployment_config.py \
+            tests/test_local_build.py \
+            -q -p no:cacheprovider

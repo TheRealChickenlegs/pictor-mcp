@@ -24,6 +24,7 @@ The server is then at `http://127.0.0.1:8077/mcp`.
   - [File ownership](#file-ownership)
   - [Which compose file](#which-compose-file)
   - [Pinning a version](#pinning-a-version)
+  - [Building locally instead of pulling](#building-locally-instead-of-pulling)
 - [Client setup](#client-setup)
   - [DeepSeek Harness (DSH)](#deepseek-harness-dsh)
   - [OpenCode](#opencode)
@@ -138,7 +139,7 @@ that this choice is free.
 | `docker-compose.yml` | CPU image. The default; `docker compose up -d`. |
 | `docker-compose.gpu.yml` | Overlay: switches to the CUDA image and passes the GPU through. |
 | `docker-compose.ml.yml` | Overlay: the ML image (CUDA + background removal, u2net baked in). |
-| `docker-compose.build.yml` | Overlay: build from this checkout instead of pulling. |
+| `docker-compose.build.yml` | Overlay: build from this checkout instead of pulling. `BUILD_TARGET` picks the variant, `LOCAL_IMAGE_TAG` names the result. |
 
 Overlays are combined with repeated `-f`, and they only add — the hardening,
 volumes and environment all come from the base file, so a variant cannot drift
@@ -166,6 +167,29 @@ IMAGE_TAG_ML=1.0.0-ml
 
 Every image also carries an immutable `sha-<short>` tag, which is the one to
 pin if you want to be certain nothing moves.
+
+### Building locally instead of pulling
+
+The CUDA and ML images are several gigabytes, and most of that is PyTorch's
+NVIDIA wheels. If you are changing the code, build the image where it runs and
+deploy a stack that names it: nothing is pushed to a registry and nothing is
+pulled.
+
+```bash
+make build-gpu     # or: scripts/build_image.sh --target gpu
+```
+
+That builds the `gpu` stage into the local Docker daemon as
+`pictor-mcp:local-gpu`, then starts it with `--network none` to prove it works
+offline. Point the stack at it with `IMAGE_REPO=pictor-mcp` and
+`IMAGE_TAG_GPU=local-gpu`; both, and the `make` targets for the other variants,
+are in [docs/portainer.md](docs/portainer.md), which also covers having
+**Portainer build the image itself** and triggering a redeploy from GitLab.
+
+Rebuilds are cheap because the application is installed above every dependency
+layer in the Dockerfile: a source edit rebuilds one small layer, and a
+`pyproject.toml` change reinstalls from a pip cache mount instead of
+re-downloading. `make build` does the CPU image in seconds.
 
 ---
 
@@ -512,13 +536,19 @@ both request the GPU.
 
 ### Building from source
 
-For a local modification, add the build overlay. Note it also needs `target:`
-changed in that file to build the CUDA or ML stage, otherwise Compose builds the
-CPU stage and tags the result with the CUDA tag:
+For a local modification, add the build overlay. `BUILD_TARGET` selects the
+Dockerfile stage and `LOCAL_IMAGE_TAG` names the result, so a CUDA build cannot
+land under the CPU tag:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+BUILD_TARGET=gpu LOCAL_IMAGE_TAG=local-gpu docker compose \
+  -f docker-compose.yml -f docker-compose.gpu.yml -f docker-compose.build.yml \
+  up -d --build
 ```
+
+`make build-gpu` (and `make up-gpu`) wrap exactly that, plus a post-build check
+that the image starts with no network. See
+[Building locally instead of pulling](#building-locally-instead-of-pulling).
 
 ---
 

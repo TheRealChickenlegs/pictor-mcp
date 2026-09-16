@@ -1,0 +1,169 @@
+# pictor-mcp - GitLab CI.
+#
+# What this pipeline is for
+# -------------------------
+# The default path deploys an image built *on the Docker host that runs it*.
+# Nothing is pushed to a registry and nothing is pulled: `scripts/build_image.sh`
+# builds into the runner's Docker daemon, and the Portainer stack that consumes it
+# names the same local tag. That is what makes a code change cost seconds instead
+# of a multi-gigabyte download - see docs/portainer.md.
+#
+# It assumes a runner that can reach the Docker daemon holding the deployment:
+# either a shell runner on that host, or a docker executor with
+# /var/run/docker.sock mounted, or `DOCKER_HOST` set to a remote/TLS daemon. A
+# runner with its own throwaway daemon (docker-in-docker) still works, but the
+# image lands in a daemon that is discarded with the job, so pair it with
+# `PUSH_IMAGE=1` and a registry the deployment can reach.
+#
+# Jobs
+# ----
+#   check:lint   ruff, the format check and the Python version floor
+#   check:test   the full pytest suite
+#   build:cpu    the small CPU image, on every branch
+#   build:gpu    the CUDA image - automatic on the default branch, manual elsewhere
+#   build:ml     the CUDA + background-removal image, same rule
+#   build:push   pushes to the GitLab container registry, only when PUSH_IMAGE=1
+#   deploy:stack triggers the Portainer stack webhook with pullimage=false
+#
+# Variables you may want to set (Settings -> CI/CD -> Variables):
+#   BUILD_TARGET          unused here; each build job pins its own target
+#   DOCKER_HOST           to build on a specific daemon, e.g. tcp://10.0.0.5:2376
+#   PORTAINER_WEBHOOK_URL the stack webhook URL; the deploy job is skipped without it
+#   PUSH_IMAGE=1          enables build:push (needs the registry enabled on GitLab)
+#   PORTAINER_INSECURE=1  for a self-signed Portainer certificate
+
+stages:
+  - check
+  - build
+  - deploy
+
+variables:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+  # The Dockerfile's cache mounts (`RUN --mount=type=cache`) require BuildKit,
+  # which is the default builder on any Docker 23+ daemon.
+  DOCKER_BUILDKIT: "1"
+  # Local image names. These must match the IMAGE_* settings of the Portainer
+  # stack that runs the image, or the stack will pull instead of using it.
+  LOCAL_IMAGE_REPO: "pictor-mcp"
+
+default:
+  interruptible: true
+
+workflow:
+  # One pipeline per change: a branch with an open merge request runs the merge
+  # request pipeline, not both.
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_TAG'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    - if: '$CI_COMMIT_BRANCH'
+
+# ------------------------------------------------------------------- checking
+check:lint:
+  stage: check
+  image: python:3.12-slim
+  script:
+    - pip install --no-cache-dir "ruff>=0.6" "vermin>=1.6"
+    - ruff check src tests scripts
+    - ruff format --check src tests scripts
+    # `-t=3.10-` means "must run on 3.10 or older"; the floor is requires-python.
+    - vermin -t=3.10- --no-tips --violations src tests scripts
+    # Every new shell script is parsed here, so a typo fails the pipeline rather
+    # than the build that needed it.
+    - for script in scripts/*.sh; do bash -n "$script"; done
+
+check:test:
+  stage: check
+  image: python:3.12-slim
+  before_script:
+    # The text-watermark tests want a real font; without one they fall back to
+    # Pillow's built-in font and assert less than they appear to.
+    - apt-get update && apt-get install -y --no-install-recommends fonts-dejavu-core
+  script:
+    - pip install --no-cache-dir -e ".[dev]"
+    - python -m pytest tests -q -p no:cacheprovider
+
+# --------------------------------------------------------------------- builds
+.build: &build
+  stage: build
+  image: docker:27-cli
+  before_script:
+    # The build script is bash; the docker CLI image is Alpine.
+    - command -v bash >/dev/null || apk add --no-cache bash
+  script:
+    - scripts/build_image.sh --target "$BUILD_TARGET" --tag "${LOCAL_IMAGE_REPO}:${LOCAL_IMAGE_TAG}"
+
+build:cpu:
+  <<: *build
+  variables:
+    BUILD_TARGET: "default"
+    LOCAL_IMAGE_TAG: "local"
+
+build:gpu:
+  <<: *build
+  variables:
+    BUILD_TARGET: "gpu"
+    LOCAL_IMAGE_TAG: "local-gpu"
+  rules:
+    # Expensive, so: always on the default branch and on tags, a click elsewhere.
+    # The dependency layers sit below COPY src/ in the Dockerfile, so a source
+    # change rebuilds the small application layer and leaves the CUDA wheels
+    # cached - this is not the multi-gigabyte job it used to be.
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_COMMIT_TAG'
+    - when: manual
+      allow_failure: true
+
+build:ml:
+  <<: *build
+  variables:
+    BUILD_TARGET: "ml"
+    LOCAL_IMAGE_TAG: "local-ml"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_COMMIT_TAG'
+    - when: manual
+      allow_failure: true
+
+build:push:
+  stage: build
+  image: docker:27-cli
+  before_script:
+    - command -v bash >/dev/null || apk add --no-cache bash
+  rules:
+    # Only for a deployment that cannot see this runner's Docker daemon. Point
+    # IMAGE_REPO at the registry this pushes to instead.
+    - if: '$PUSH_IMAGE != "1"'
+      when: never
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_COMMIT_TAG'
+  script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+    # A tag pipeline pushes the tag as the image tag; a branch pipeline pushes the
+    # short SHA, which is unique and traceable back to the commit.
+    - export IMAGE_TAG="${CI_COMMIT_TAG:-$CI_COMMIT_SHORT_SHA}"
+    - scripts/build_image.sh --target "${BUILD_TARGET:-gpu}" --tag "${CI_REGISTRY_IMAGE}:${IMAGE_TAG}" --push
+
+# ------------------------------------------------------------------ deploying
+deploy:stack:
+  stage: deploy
+  image: alpine:3.21
+  before_script:
+    - apk add --no-cache bash curl
+  rules:
+    # No webhook URL configured means no deployment to trigger; a stack that
+    # Portainer watches through GitOps does not need this job at all.
+    - if: '$PORTAINER_WEBHOOK_URL == null || $PORTAINER_WEBHOOK_URL == ""'
+      when: never
+    - if: '$CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH && $CI_COMMIT_TAG == null'
+      when: never
+    # Manual: the pipeline proposes, a human deploys. Remove `when: manual` to
+    # make a push to the default branch deploy by itself.
+    - when: manual
+      allow_failure: true
+  script:
+    # pullimage=false is the point: the image was just built on this host, so a
+    # pull would find nothing in any registry. See scripts/portainer_deploy.sh.
+    - scripts/portainer_deploy.sh

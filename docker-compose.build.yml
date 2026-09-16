@@ -5,39 +5,62 @@
 #
 #   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 #
-# Combined with an image overlay, this one wins for the image name but you must
-# also point `target` at the stage you want, otherwise Compose builds the CPU
-# stages and tags the result with the CUDA tag, which produces a working image
-# with no torch in it. The `target` values below match the stage names in the
-# Dockerfile:
+# The image name is overridden to a local tag so a build can never overwrite a
+# published tag in the registry by accident.
 #
-#   default -> the CPU image (alias for `base`, the Dockerfile's last stage)
-#   gpu     -> CPU plus PyTorch CUDA wheels
-#   ml      -> gpu plus rembg/onnxruntime-gpu with u2net baked in
+# Picking the variant
+# -------------------
+# `BUILD_TARGET` selects the Dockerfile stage, and it has to match the image you
+# mean to run - otherwise you get a working CPU image under a CUDA tag:
+#
+#   BUILD_TARGET=default -> the CPU image        (with docker-compose.yml alone)
+#   BUILD_TARGET=gpu     -> plus PyTorch CUDA    (with docker-compose.gpu.yml)
+#   BUILD_TARGET=ml      -> plus rembg + u2net   (with docker-compose.ml.yml)
+#
+# `LOCAL_IMAGE_TAG` names the result. Give each variant its own tag, or building
+# the ML image silently replaces the CPU image you were running. The two are
+# independent variables because Compose cannot derive one from the other:
+#
+#   BUILD_TARGET=gpu LOCAL_IMAGE_TAG=local-gpu
 #
 # So, to build and run the local GPU image:
 #
-#   docker compose \
+#   BUILD_TARGET=gpu LOCAL_IMAGE_TAG=local-gpu docker compose \
 #     -f docker-compose.yml \
 #     -f docker-compose.gpu.yml \
 #     -f docker-compose.build.yml \
 #     up -d --build
 #
-# ...after changing `target: default` below to `target: gpu`.
+# `scripts/build_image.sh` (or `make build-gpu`) does the same thing with the
+# matching tag, a cache-friendly invocation and a post-build smoke test, then
+# prints the .env lines for it. That is the easier path.
 #
-# The image name is overridden to a local tag so a build can never overwrite a
-# published tag in the registry by accident.
+# Building where Portainer can see it
+# -----------------------------------
+# A build here writes the image into the local Docker daemon. A stack that names
+# the same local tag - `IMAGE_REPO=pictor-mcp` plus `IMAGE_TAG=local` in .env -
+# then needs no registry and no download at all. To have Portainer run the build
+# itself, on the host it manages, see docs/portainer.md and
+# scripts/portainer_build.sh.
+#
+# Why rebuilds are cheap
+# ----------------------
+# The dependency layers (CUDA wheels, the ML model) sit *below* `COPY src/` in
+# the Dockerfile, so a source edit rebuilds one small layer, and the pip cache
+# mount behind the big installs means even a forced reinstall of them comes off
+# the local disk. Read the note at the top of the Dockerfile before reordering
+# anything.
 
 services:
   pictor-mcp:
     build:
       context: .
-      # Change to `gpu` or `ml` when combining this with one of those overlays.
-      target: default
+      # Must match the variant you are deploying. Defaults to the CPU image.
+      target: ${BUILD_TARGET:-default}
       # Override the CUDA build for the gpu/ml stages. Leave TORCH_VERSION empty
       # (the default) to take the newest build the index publishes for the base
       # image's Python; set it only to pin an exact version.
       # args:
       #   TORCH_INDEX_URL: "https://download.pytorch.org/whl/cu129"
       #   TORCH_VERSION: "2.14.0"
-    image: pictor-mcp:local
+    image: pictor-mcp:${LOCAL_IMAGE_TAG:-local}

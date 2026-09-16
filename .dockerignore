@@ -9,6 +9,8 @@
 .git
 .gitignore
 .github
+.gitlab-ci.yml
+Makefile
 .ruff_cache
 .pytest_cache
 .mypy_cache
