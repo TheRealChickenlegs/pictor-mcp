@@ -62,6 +62,21 @@ latter so an agent can read back what the server produced (resize, then compare)
 That is server-owned space, so the trust boundary is unchanged. Writes are
 restricted to the output root alone.
 
+`image_list_inputs` reports filenames (never contents) from those same roots,
+newest first. It is a discovery convenience, not a new boundary: anything it
+lists was already readable by path, and it cannot name a file the jail would
+refuse. Two consequences are worth stating plainly, because they are the reason
+this is worth a paragraph rather than a line:
+
+* **Filenames become enumerable.** A caller no longer has to guess a name to
+  learn that a file exists. On a deployment whose input root is shared — a chat
+  UI's upload directory mounted for the whole team, for instance — every user's
+  filenames are visible to anyone who can call the tools.
+* **A mount is the boundary.** If that is not the intended exposure, mount a
+  narrower directory, mount per-user directories as separate roots and use
+  different tool credentials per person, or leave the store unmounted and hand
+  files over deliberately.
+
 ### 2. Resource limits
 
 Decoding happens only after the declared geometry is checked, so a bomb is

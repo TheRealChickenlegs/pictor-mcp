@@ -187,6 +187,7 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
             notes=[
                 "Image is written to the output root and also returned inline when requested.",
                 "Use image_transform to chain several steps in one call.",
+                "Call image_list_inputs to discover readable files when a path is not known.",
             ],
         )
         text_lines = [

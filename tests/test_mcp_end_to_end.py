@@ -48,6 +48,7 @@ class TestProtocolSurface:
         names = {tool.name for tool in tools.tools}
         assert names == {
             "image_capabilities",
+            "image_list_inputs",
             "image_info",
             "image_convert",
             "image_resize",

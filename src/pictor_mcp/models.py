@@ -118,6 +118,38 @@ class BatchResult(_Model):
     inline_image_included: bool = Field(default=False, alias="inlineImageIncluded")
 
 
+class InputFile(_Model):
+    """One file that is available to read, as returned by image_list_inputs."""
+
+    path: str = Field(
+        description=(
+            "Pass this as `path` to any image tool. Relative to an input root where "
+            "that is unambiguous, absolute otherwise."
+        )
+    )
+    name: str = Field(description="Filename without its directory.")
+    byte_size: int = Field(alias="byteSize")
+    modified: str = Field(description="Last modification time, ISO-8601 UTC.")
+    root: str = Field(description="The input root this file was found under.")
+
+
+class InputListing(_Model):
+    """What is available to read.
+
+    Deliberately metadata only: listing must not decode anything, so it stays
+    cheap enough to call before every operation, and cannot be used to make the
+    server do work by remote control.
+    """
+
+    files: list[InputFile] = Field(default_factory=list)
+    roots: list[str] = Field(default_factory=list, description="Roots that were searched, in order.")
+    scanned: int = Field(description="Directory entries examined.")
+    truncated: bool = Field(
+        default=False,
+        description="True when the scan or the result limit cut the listing short.",
+    )
+
+
 class BackendReport(_Model):
     """Runtime capability report."""
 
@@ -141,5 +173,7 @@ __all__ = [
     "FileOutput",
     "ImageResult",
     "InfoResult",
+    "InputFile",
+    "InputListing",
     "SizeChange",
 ]

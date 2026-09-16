@@ -32,6 +32,8 @@ The server is then at `http://127.0.0.1:8077/mcp`.
   - [Open WebUI](#open-webui)
   - [Any other stdio client](#any-other-stdio-client)
 - [Tools](#tools)
+  - [Image inputs](#image-inputs)
+    - [Attaching an image in a chat UI](#attaching-an-image-in-a-chat-ui)
 - [How results come back](#how-results-come-back)
 - [GPU acceleration](#gpu-acceleration)
 - [Security](#security)
@@ -332,7 +334,7 @@ by that account instead. See [File ownership](#file-ownership).
 
 ## Tools
 
-14 tools. `image_capabilities` reports exactly which are usable in your
+15 tools. `image_capabilities` reports exactly which are usable in your
 deployment, so an agent can check rather than guess.
 
 ### Inspect
@@ -340,6 +342,7 @@ deployment, so an agent can check rather than guess.
 | Tool | Purpose |
 |---|---|
 | `image_capabilities` | Formats, operations, limits, security posture, GPU status. |
+| `image_list_inputs` | What the server can read, newest first, with the `path` to pass on. |
 | `image_info` | Dimensions, format, mode, frames, EXIF, perceptual hashes, dominant colours. |
 | `image_compare` | SSIM, RMSE, PSNR, changed-pixel ratio and hash distance between two images. |
 
@@ -406,6 +409,47 @@ this server sits *inside* the network those addresses name — an image that onl
 exists on that network (a chat UI's own file endpoint, a NAS, another container)
 has to be mounted under `PICTOR_INPUT_ROOTS` and passed as `path`. URLs needing
 credentials are refused too, since the fetch carries none.
+
+#### Attaching an image in a chat UI
+
+The awkward case: the image lives in your chat UI's own storage, several people
+upload to it, and nobody is going to copy files into a mount by hand. Mount that
+storage read-only and it stops being awkward — the file is already there, and
+`image_list_inputs` lets the model find it instead of guessing.
+
+For Open WebUI, uploads are written flat into its `uploads/` directory as
+`<file-id>_<original-name>`, so a file attached in a chat is on disk as
+`3e6925c9-9b74-4437-ad9d-a246c127592a_Chickenlegs.png`:
+
+```bash
+# where Open WebUI keeps its data, on the host:
+docker inspect open-webui --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{"\n"}}{{end}}'
+```
+
+```yaml
+# pictor-mcp stack: add the store as a second read-only input root
+volumes:
+  - ${DOCKER_PATH}/pictor/input:/data/input:ro
+  - /path/to/open-webui/data/uploads:/data/uploads:ro
+
+environment:
+  PICTOR_INPUT_ROOTS: /data/input,/data/uploads
+  PICTOR_SERVE_OUTPUTS: "true"     # so the result renders back in the chat
+```
+
+The model then calls `image_list_inputs` (optionally `pattern="*.png"`), sees the
+newest attachments with the exact `path` to use, and converts one:
+
+```
+image_list_inputs(pattern="*.png")
+image_convert(path="3e6925c9-..._Chickenlegs.png", target_format="webp")
+```
+
+Worth knowing before you mount it: every user's uploads become files that anyone
+who can call the tools may read or enumerate. That is the same group of people
+who can already see those images in the chat UI, but it is a filesystem promise
+rather than a per-user API one. `image_list_inputs` skips dotfiles, symlinks and
+anything that is not a regular file, and never leaves the configured roots.
 
 ---
 
@@ -808,7 +852,7 @@ src/pictor_mcp/
 ├── security/          path jail, limits, SSRF guard, auth, concurrency
 ├── imaging/           formats, loader, ops, encode, pipeline, analysis
 ├── backends/          pluggable CPU/CUDA resampling
-└── tools/             the 14 MCP tools
+└── tools/             the 15 MCP tools
 ```
 
 ## License

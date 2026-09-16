@@ -16,14 +16,16 @@ logger = logging.getLogger(__name__)
 
 def register_all(server, ctx: ToolContext) -> list[str]:
     """Register every tool group; returns the registered tool names."""
-    from . import analysis, basic, compose
+    from . import analysis, basic, compose, discovery
 
     basic.register(server, ctx)
     compose.register(server, ctx)
     analysis.register(server, ctx)
+    discovery.register(server, ctx)
 
     names = [
         "image_capabilities",
+        "image_list_inputs",
         "image_info",
         "image_convert",
         "image_resize",
