@@ -27,22 +27,24 @@ import pytest
 from PIL import Image
 
 
-class _no_op_context:
-    """Stand-in for ``torch.inference_mode()``."""
-
-    def __enter__(self) -> None:
-        return None
-
-    def __exit__(self, *exc: object) -> bool:
-        return False
-
-
 class _FakeTensor:
-    """Minimal NCHW tensor backed by numpy, enough for the backend's pipeline."""
+    """Minimal NCHW tensor backed by numpy, enough for the backend's pipeline.
+
+    Emulates the two torch rules that the real backend got wrong, because a
+    permissive stub passes code that fails on hardware:
+
+      * ``torch.from_numpy`` refuses (in practice: warns and reserves undefined
+        behaviour) for a non-writable buffer, so the stub records writability.
+      * a tensor created inside ``torch.inference_mode()`` is an *inference
+        tensor*, and in-place updates to one are forbidden once the mode has
+        exited. ``clamp_`` reproduces that error exactly.
+    """
 
     def __init__(self, array: np.ndarray) -> None:
         self.array = array
         self.calls: list[str] = []
+        self.is_inference = False
+        self.owner: FakeTorch | None = None
 
     # -- conversion. `.to()` is called both as `to(device=..., dtype=...)` and
     # positionally as `to(torch.uint8)`, so it accepts either.
@@ -76,6 +78,13 @@ class _FakeTensor:
 
     # -- value
     def clamp_(self, low: float, high: float) -> _FakeTensor:
+        self.calls.append("clamp_")
+        owner = self.owner
+        if self.is_inference and owner is not None and owner.inference_depth == 0:
+            raise RuntimeError(
+                "Inplace update to inference tensor outside InferenceMode is not allowed."
+                "You can make a clone to get a normal tensor before doing inplace update."
+            )
         self.array = np.clip(self.array, low, high)
         return self
 
@@ -85,8 +94,9 @@ class _FakeTensor:
 
 
 class _FakeFunctional:
-    def __init__(self, recorder: dict[str, int]) -> None:
-        self._recorder = recorder
+    def __init__(self, owner: FakeTorch) -> None:
+        self._owner = owner
+        self._recorder = owner.recorder
 
     def interpolate(
         self,
@@ -115,7 +125,22 @@ class _FakeFunctional:
         resized = np.asarray(image.resize((width, height), Image.Resampling.BILINEAR))
         if single_channel:
             resized = resized[:, :, np.newaxis]
-        return _FakeTensor(resized[np.newaxis, ...].transpose(0, 3, 1, 2))
+        out = self._owner._make_tensor(resized[np.newaxis, ...].transpose(0, 3, 1, 2))
+        return out
+
+
+class _InferenceMode:
+    """Context manager mirroring ``torch.inference_mode()``."""
+
+    def __init__(self, owner: FakeTorch) -> None:
+        self._owner = owner
+
+    def __enter__(self) -> None:
+        self._owner._inference_depth += 1
+
+    def __exit__(self, *exc: object) -> bool:
+        self._owner._inference_depth -= 1
+        return False
 
 
 class FakeTorch(types.ModuleType):
@@ -165,7 +190,7 @@ class FakeTorch(types.ModuleType):
             def empty_cache() -> None:
                 backend_self.recorder["empty_cache"] = backend_self.recorder.get("empty_cache", 0) + 1
 
-        functional = _FakeFunctional(self.recorder)
+        functional = _FakeFunctional(self)
         if interpolate_raises is not None:
 
             def _raising(*args: Any, **kwargs: Any) -> Any:
@@ -174,21 +199,44 @@ class FakeTorch(types.ModuleType):
 
             functional.interpolate = _raising  # type: ignore[method-assign]
 
+        self._inference_depth = 0
+        self.inference_mode = self._inference_mode
+
         self.cuda = _Cuda()
         self.nn = types.SimpleNamespace(functional=functional)
         # The backend names these directly: `dtype=torch.float32` and `.to(torch.uint8)`.
         self.float32 = np.float32
         self.uint8 = np.uint8
 
-        # `torch.inference_mode()` wraps the interpolate call. A no-op context
-        # manager is enough: the point of the test is the control flow around the
-        # device, not autograd.
-        self.inference_mode = _no_op_context
+    # -- inference mode
+    @property
+    def inference_depth(self) -> int:
+        return self._inference_depth
+
+    def _inference_mode(self) -> Any:
+        return _InferenceMode(self)
+
+    def _make_tensor(self, array: np.ndarray) -> _FakeTensor:
+        tensor = _FakeTensor(np.array(array, copy=True))
+        tensor.owner = self
+        tensor.is_inference = self._inference_depth > 0
+        return tensor
 
     # -- tensor construction
     def from_numpy(self, array: np.ndarray) -> _FakeTensor:
         self.recorder["from_numpy"] = self.recorder.get("from_numpy", 0) + 1
-        return _FakeTensor(np.array(array, copy=True))
+        # Recorded rather than enforced: torch warns here, and the test asserts
+        # on it, so the contract is explicit without the stub being stricter
+        # than the library it stands in for.
+        self.recorder.setdefault("buffer_writable", []).append(bool(array.flags.writeable))
+        return self._make_tensor(array)
+
+    # -- out-of-place clamp, the form that is legal outside inference mode
+    def clamp(self, tensor: _FakeTensor, low: float, high: float) -> _FakeTensor:
+        self.recorder["clamp"] = self.recorder.get("clamp", 0) + 1
+        out = self._make_tensor(np.clip(tensor.array, low, high))
+        out.is_inference = tensor.is_inference
+        return out
 
 
 @pytest.fixture
@@ -319,6 +367,34 @@ class TestResize:
         backend = _backend(stub_torch)
         backend.resize(Image.new("RGB", (32, 32)), (16, 16), Image.Resampling.NEAREST)
         assert backend._torch.recorder["modes"][-1] == "nearest"
+
+    def test_the_buffer_handed_to_torch_is_writable(self, stub_torch) -> None:
+        """torch.from_numpy needs a writable buffer.
+
+        A PIL image exposes a read-only one, and `np.ascontiguousarray` returns
+        the *same* object when the array is already contiguous - which it is,
+        straight from Pillow - so it does not copy and the read-only flag reaches
+        torch. Torch warns and reserves the right to undefined behaviour on
+        write, which is not a state to leave a resize in.
+        """
+        backend = _backend(stub_torch)
+        backend.resize(Image.new("RGB", (32, 32)), (16, 16), Image.Resampling.BILINEAR)
+        writable = backend._torch.recorder.get("buffer_writable", [])
+        assert writable, "torch.from_numpy was never called"
+        assert all(writable), "a read-only buffer was handed to torch"
+
+    def test_no_inplace_update_happens_outside_inference_mode(self, stub_torch) -> None:
+        """Tensors made inside inference_mode reject in-place updates after it.
+
+        The stub raises the same RuntimeError torch does, so this fails if the
+        clamp ever moves back outside the `with` block or becomes the in-place
+        form again.
+        """
+        backend = _backend(stub_torch)
+        result = backend.resize(Image.new("RGB", (32, 32)), (16, 16), Image.Resampling.BILINEAR)
+        assert result is not None, backend._last_error
+        recorder = backend._torch.recorder
+        assert recorder.get("clamp", 0) >= 1, "the out-of-place clamp was not used"
 
     def test_a_degenerate_target_is_refused(self, stub_torch) -> None:
         backend = _backend(stub_torch)

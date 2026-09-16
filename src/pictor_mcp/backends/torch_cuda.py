@@ -246,9 +246,29 @@ class TorchCudaBackend:
         try:
             with self._lock:  # one device transfer at a time keeps peak memory bounded
                 array = np.asarray(image)
+
+                # torch.from_numpy requires a writable buffer, and a PIL image
+                # exposes a read-only one. np.ascontiguousarray returns the same
+                # object when the array is already contiguous - which it is,
+                # coming straight from Pillow - so it does not copy and the
+                # read-only flag survives into torch, which warns and reserves
+                # the right to produce undefined behaviour on write.
+                if not array.flags.c_contiguous or not array.flags.writeable:
+                    array = np.array(array, copy=True, order="C")
+
                 # (H, W, C) uint8 -> (1, C, H, W) float32
-                tensor = torch.from_numpy(np.ascontiguousarray(array)).to(device=self._device, dtype=torch.float32)
+                tensor = torch.from_numpy(array).to(device=self._device, dtype=torch.float32)
                 tensor = tensor.permute(2, 0, 1).unsqueeze(0) if array.ndim == 3 else (tensor.unsqueeze(0).unsqueeze(0))
+
+                # The whole conversion lives inside inference_mode. Tensors made
+                # there are "inference tensors", and torch forbids in-place
+                # updates to them once the mode has exited:
+                #
+                #   RuntimeError: Inplace update to inference tensor outside
+                #   InferenceMode is not allowed.
+                #
+                # `clamp` is therefore the out-of-place form, so the code is
+                # correct even if a later edit moves a line back out of the block.
                 with torch.inference_mode():
                     resized = torch.nn.functional.interpolate(
                         tensor,
@@ -259,8 +279,8 @@ class TorchCudaBackend:
                         # Pillow's Lanczos by a wide margin.
                         antialias=mode != "nearest",
                     )
-                resized = resized.clamp_(0, 255).to(torch.uint8)
-                result = resized.squeeze(0).permute(1, 2, 0).contiguous().cpu().numpy()
+                    resized = torch.clamp(resized, 0, 255).to(torch.uint8)
+                    result = resized.squeeze(0).permute(1, 2, 0).contiguous().cpu().numpy()
         except Exception as exc:
             # Never let an accelerator failure surface as a tool error: the CPU
             # path can always produce the answer.
