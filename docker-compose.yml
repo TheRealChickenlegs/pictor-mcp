@@ -146,15 +146,27 @@ x-pictor-environment: &pictor-environment
 
   # --- which hosts may reach the API ---------------------------------------
   # Host and Origin are validated on every route; this is the DNS-rebinding
-  # defence. These defaults suit the loopback port mapping below.
+  # defence.
   #
-  # If you publish the port on a LAN address you MUST add that address here, or
-  # every browser-originated request is refused:
-  #   PICTOR_ALLOWED_HOSTS=192.168.1.10:8077,pictor.internal:8077
-  #   PICTOR_ALLOWED_ORIGINS=http://192.168.1.10:8077
-  # Non-browser MCP clients send no Origin, so they are unaffected either way.
+  # The defaults cover two things:
+  #
+  #   * loopback, for a client on the Docker host reaching the published port
+  #   * `pictor-mcp:*`, the service name, which is how another CONTAINER on the
+  #     same Docker network reaches this one. That is the common case - a chat
+  #     UI or an MCP aggregator in a neighbouring container calls
+  #     http://pictor-mcp:8077/mcp, so the Host header is `pictor-mcp:8077` and
+  #     a loopback-only list rejects it with "host header is not allowed".
+  #
+  # Renaming the service means updating this list to match, or the other
+  # container is refused.
+  #
+  # Add an address when clients reach the server by a name that is neither:
+  #   PICTOR_ALLOWED_HOSTS=127.0.0.1:*,localhost:*,pictor-mcp:*,192.168.10.5:8077
+  #   PICTOR_ALLOWED_ORIGINS=http://192.168.10.5:8077
+  # Non-browser MCP clients send no Origin, so the origin list only matters for
+  # a browser talking to the API directly.
   PICTOR_DNS_REBINDING_PROTECTION: ${PICTOR_DNS_REBINDING_PROTECTION:-true}
-  PICTOR_ALLOWED_HOSTS: ${PICTOR_ALLOWED_HOSTS:-127.0.0.1:*,localhost:*,127.0.0.1:8077,localhost:8077}
+  PICTOR_ALLOWED_HOSTS: ${PICTOR_ALLOWED_HOSTS:-127.0.0.1:*,localhost:*,pictor-mcp:*}
   PICTOR_ALLOWED_ORIGINS: ${PICTOR_ALLOWED_ORIGINS:-http://127.0.0.1:*,http://localhost:*}
   # Only meaningful behind TLS termination. Set true once a reverse proxy serves
   # this over https.

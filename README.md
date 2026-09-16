@@ -562,7 +562,7 @@ commented alternatives, including binding one specific interface
 addresses (VPN, `docker0`, a second NIC).
 
 **2. Set the allow-lists to match**, or browser-originated requests are refused
-by design. The defaults only name loopback:
+by design. The defaults name only loopback and the compose service name:
 
 ```bash
 PICTOR_ALLOWED_HOSTS=192.168.1.10:8077,pictor.internal:8077
@@ -582,6 +582,28 @@ the server speaks plain HTTP by design, so put Caddy/nginx/Traefik in front if
 the network is not trusted. When the proxy makes the external host or port differ
 from the bind address, also set `PICTOR_PUBLIC_BASE_URL` so generated file links
 point somewhere useful.
+
+### Connecting from another container
+
+This is not the same as exposing the port, and the port mapping is irrelevant to
+it: containers on one Docker network reach each other by service name on the
+container's own port, never through the host's published port. A client that
+calls `http://pictor-mcp:8077/mcp` sends `Host: pictor-mcp:8077`, so the
+`PICTOR_ALLOWED_HOSTS` default includes `pictor-mcp:*` and this works with no
+extra configuration.
+
+Renaming the service in `docker-compose.yml` renames the Host header too, so
+update the allow-list to match. If a client is refused with
+
+```
+rejected request: host header 'X' is not allowed
+```
+
+then `X` is the value to add to `PICTOR_ALLOWED_HOSTS` — an aggregator that
+reaches the server through a reverse proxy, or by a LAN name, sends that name
+instead. The rejection is logged before authentication is checked, so a Host
+rejection is not an indication that the token is wrong; fix the Host list first,
+then confirm the token.
 
 ### Generated file URLs
 
@@ -629,6 +651,7 @@ The most consequential ones:
 | `PICTOR_HTTP_ACCESS_LOG` | `false` | uvicorn access log; off so signed URLs are not written to logs. |
 | `PICTOR_MAX_CONCURRENCY` | `4` | Concurrent operations; size with `mem_limit`. |
 | `PICTOR_STRIP_METADATA` | `true` | Strip EXIF/GPS/ICC from outputs. |
+| `PICTOR_ALLOWED_HOSTS` | loopback + `pictor-mcp:*` in Docker | Host headers accepted. Add a name if a client is refused; see [Connecting from another container](#connecting-from-another-container). |
 | `PICTOR_GPU` | `off` (`auto` in the GPU image) | `auto`, `off` or `torch`. |
 
 Invalid values make the server **refuse to start** rather than fall back to a

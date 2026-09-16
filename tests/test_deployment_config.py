@@ -381,6 +381,28 @@ class TestComposeConfiguration:
         gid = re.search(r"\$\{PGID:-([^}]*)\}", _load(BASE_COMPOSE)["services"][SERVICE]["user"])
         assert gid and gid.group(1) not in {"", "0"}
 
+    def test_the_default_host_list_accepts_the_compose_service_name(self) -> None:
+        """The sibling-container case must work without reading the docs.
+
+        Another container on the same Docker network reaches this one as
+        ``http://pictor-mcp:8077/mcp``, so the Host header is the service name.
+        A loopback-only default rejects that with "host header is not allowed",
+        which reads as an auth failure but is not one - the operator has no way
+        to guess that a *name* is the missing piece. Renaming the service must
+        keep this passing, so the expected value is derived from the compose
+        file rather than hardcoded.
+        """
+        from pictor_mcp.security.auth import _host_matches
+
+        config = load_config(_env(BASE_COMPOSE))
+        assert f"{SERVICE}:*" in config.http.allowed_hosts, config.http.allowed_hosts
+        assert _host_matches(f"{SERVICE}:{config.http.port}", config.http.allowed_hosts) is True
+        # A port-less Host is legal HTTP and must reach the same place.
+        assert _host_matches(SERVICE, config.http.allowed_hosts) is True
+        # Widening the default must not have widened it to everything.
+        assert _host_matches("evil.example.com", config.http.allowed_hosts) is False
+        assert _host_matches("pictor-mcp.evil.com", config.http.allowed_hosts) is False
+
     @pytest.mark.parametrize("path", [BASE_COMPOSE, GPU_OVERLAY, ML_OVERLAY], ids=lambda p: p.name)
     def test_no_service_hardcodes_a_runtime_uid(self, path: Path) -> None:
         """A literal here is what made the container and the host disagree."""

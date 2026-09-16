@@ -264,7 +264,9 @@ Being explicit about these is more useful than implying they do not exist.
       on an untrusted network.
 - [ ] TLS terminated in front, if the network is not trusted.
 - [ ] `PICTOR_ALLOWED_HOSTS` / `PICTOR_ALLOWED_ORIGINS` set to the real external
-      address if you changed the bind or published port.
+      address if you changed the bind or published port. The default also accepts
+      the compose service name (`pictor-mcp:*`) so sibling containers work; that
+      name is not resolvable from a browser, so it adds no reachability.
 - [ ] `PICTOR_INPUT_ROOTS` mounted read-only and as narrowly as possible.
 - [ ] `PICTOR_OUTPUT_ROOT` on a host directory you are happy to grow.
 - [ ] `PICTOR_ALLOW_NET_FETCH` left `false` unless URL inputs are genuinely
