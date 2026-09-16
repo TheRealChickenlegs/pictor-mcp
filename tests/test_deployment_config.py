@@ -17,7 +17,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 import yaml
@@ -63,6 +63,8 @@ COMPOSE_ONLY_VARS = frozenset(
         "IMAGE_TAG",
         "IMAGE_TAG_GPU",
         "IMAGE_TAG_ML",
+        "BUILD_TARGET",
+        "LOCAL_IMAGE_TAG",
         "BIND_ADDRESS",
         "PUID",
         "PGID",
@@ -182,6 +184,48 @@ def _interpolated_names(path: Path) -> set[str]:
     """
     active = "\n".join(line for line in path.read_text().splitlines() if not line.lstrip().startswith("#"))
     return {name for name, _ in _INTERPOLATION.findall(active)}
+
+
+_STAGE_HEADER = re.compile(r"^FROM\s+(\S+)\s+AS\s+(\S+)\s*$", re.MULTILINE)
+
+
+def _docker_stages() -> dict[str, tuple[str, str]]:
+    """Map each stage alias to ``(base, body)``, in file order.
+
+    The build stages are not independent: `gpu` inherits `gpu-deps`, which
+    inherits `base-deps`, and the layer order across that chain is what decides
+    whether a source edit re-downloads the CUDA wheels. Answering that question
+    needs the body of a specific stage, which is what this returns.
+    """
+    text = DOCKERFILE.read_text()
+    headers = list(_STAGE_HEADER.finditer(text))
+    stages: dict[str, tuple[str, str]] = {}
+    for index, match in enumerate(headers):
+        end = headers[index + 1].start() if index + 1 < len(headers) else len(text)
+        stages[match.group(2)] = (match.group(1), text[match.end() : end])
+    return stages
+
+
+def _stage_commands(alias: str) -> str:
+    """A stage's body with its comments removed.
+
+    Comments here explain the approach that was *rejected* - "do not use
+    --extra-index-url", "the placeholder is why the app is installed last" - so a
+    naive `in` check would match the explanation instead of the code.
+    """
+    _, body = _docker_stages()[alias]
+    return "\n".join(line for line in body.splitlines() if not line.lstrip().startswith("#"))
+
+
+def _run_blocks(body: str) -> list[str]:
+    """One string per RUN instruction, continuations joined.
+
+    Per-instruction granularity is what makes "every pip install has a cache
+    mount" answerable: a stage-wide search would be satisfied by a mount attached
+    to a different command.
+    """
+    joined = re.sub(r"\\\s*\n", " ", body)
+    return [line.strip() for line in joined.splitlines() if line.lstrip().startswith("RUN ")]
 
 
 class TestComposeStructure:
@@ -601,9 +645,14 @@ class TestDockerfile:
 
     def test_build_overlay_target_is_a_real_stage(self) -> None:
         """The contributor path must not point at a stage that does not exist."""
-        stages = set(re.findall(r"^FROM\s+\S+\s+AS\s+(\S+)", DOCKERFILE.read_text(), re.MULTILINE))
-        target = _load(BUILD_OVERLAY)["services"][SERVICE]["build"]["target"]
-        assert target in stages, f"{target!r} is not one of {sorted(stages)}"
+        stages = set(_docker_stages())
+        raw = _load(BUILD_OVERLAY)["services"][SERVICE]["build"]["target"]
+        # Compose interpolates ${BUILD_TARGET:-default}; the *default* is what a
+        # bare `docker compose build` uses, so it is what has to be a real stage.
+        match = re.fullmatch(r"\$\{([A-Z0-9_]+)(?::-([^}]*))?\}", str(raw).strip())
+        assert match, f"unexpected target expression: {raw!r}"
+        assert match.group(1) == "BUILD_TARGET", raw
+        assert match.group(2) in stages, f"{match.group(2)!r} is not one of {sorted(stages)}"
 
     def test_default_stage_is_the_cpu_image(self) -> None:
         assert re.search(r"^FROM base AS default\s*$", DOCKERFILE.read_text(), re.MULTILINE)
@@ -641,11 +690,7 @@ class TestDockerfile:
         mirrors torch's dependencies, so replacing PyPI outright resolves
         cleanly and leaves only one index to trust.
         """
-        gpu_stage = DOCKERFILE.read_text().split("FROM base AS gpu", 1)[1]
-        gpu_stage = gpu_stage.split("FROM gpu AS ml", 1)[0]
-        # Comments describe the approach that was rejected, so they have to be
-        # stripped before scanning or the explanation trips the check.
-        commands = "\n".join(line for line in gpu_stage.splitlines() if not line.lstrip().startswith("#"))
+        commands = _stage_commands("gpu-deps")
         assert "--index-url" in commands
         assert "--extra-index-url" not in commands
 
@@ -694,6 +739,85 @@ class TestDockerfile:
 
     def test_oci_source_label_is_the_real_repository(self) -> None:
         assert "TheRealChickenlegs/pictor-mcp" in DOCKERFILE.read_text()
+
+
+class TestImageLayerOrder:
+    """The application must be installed above every dependency layer.
+
+    This is the difference between a code change costing seconds and costing a
+    multi-gigabyte reinstall. `COPY src/` used to sit below the PyTorch install,
+    so every source edit invalidated the CUDA layer and the next build fetched
+    the NVIDIA wheels again - on a laptop, in CI and through the Portainer build
+    API alike. These tests are the reason nobody has to remember that.
+    """
+
+    #: The variant image and the dependency stage it must inherit.
+    VARIANTS: ClassVar[dict[str, str]] = {"base": "base-deps", "gpu": "gpu-deps", "ml": "ml-deps"}
+
+    def test_variant_images_are_built_on_their_dependency_stage(self) -> None:
+        stages = _docker_stages()
+        for image, deps in self.VARIANTS.items():
+            assert stages[image][0] == deps, f"{image} is built on {stages[image][0]}"
+
+    def test_the_dependency_chain_is_linear_and_ordered(self) -> None:
+        """gpu depends on base, ml on gpu - so the layering must be linear."""
+        stages = _docker_stages()
+        assert stages["base-deps"][0] == "system"
+        assert stages["gpu-deps"][0] == "base-deps"
+        assert stages["ml-deps"][0] == "gpu-deps"
+
+    @pytest.mark.parametrize("alias", ["base-deps", "gpu-deps", "ml-deps"])
+    def test_no_dependency_stage_copies_the_source(self, alias: str) -> None:
+        """A COPY src/ here would invalidate every layer above it."""
+        assert "COPY src" not in _stage_commands(alias), f"{alias} copies src/"
+
+    @pytest.mark.parametrize("alias", ["base", "gpu", "ml"])
+    def test_every_variant_copies_the_source_and_reinstalls_the_package(self, alias: str) -> None:
+        commands = _stage_commands(alias)
+        assert "COPY src/" in commands, f"{alias} never copies the application"
+        assert "--force-reinstall --no-deps" in commands, (
+            f"{alias} must replace the placeholder package unconditionally; "
+            "without --force-reinstall pip is allowed to decide it is already satisfied"
+        )
+
+    @pytest.mark.parametrize("alias", ["base", "gpu", "ml"])
+    def test_every_variant_verifies_the_package_it_built(self, alias: str) -> None:
+        """The guard rail for the placeholder package.
+
+        The dependency stages install an empty placeholder module, and the
+        variant stage replaces it. If that replacement ever stopped happening,
+        the image would build happily and die on start; asserting the import at
+        build time turns that into a failed build.
+        """
+        commands = _stage_commands(alias)
+        assert "import pictor_mcp" in commands, f"{alias} does not verify its own install"
+
+    def test_the_placeholder_is_created_before_the_dependencies_are_installed(self) -> None:
+        """`pip install .` needs a package to exist, and pyproject is the only
+        dependency list. The placeholder is what lets both be true."""
+        commands = _stage_commands("base-deps")
+        assert "src/pictor_mcp/__init__.py" in commands
+        assert "pip install" in commands
+
+    def test_every_pip_install_is_attached_to_its_cache_mount(self) -> None:
+        """A mount without PIP_CACHE_DIR (or with PIP_NO_CACHE_DIR left at the
+        default of 1) is a cache that silently does nothing - a build that looks
+        cache-friendly and re-downloads torch anyway."""
+        installs = [
+            block
+            for alias in ("base-deps", "gpu-deps", "ml-deps", "base", "gpu", "ml")
+            for block in _run_blocks(_stage_commands(alias))
+            if "pip install" in block
+        ]
+        assert installs, "no pip install found in the Dockerfile"
+        for block in installs:
+            # --mount is a flag of the RUN instruction, not an argument of the
+            # command: in the middle of the line it is handed to pip, which
+            # rejects it. So it has to be the first thing after `RUN`.
+            mount = re.match(r"RUN\s+--mount=type=cache,target=(\S+)\s", block)
+            assert mount, f"pip install with no RUN-level cache mount: {block[:160]}"
+            assert f"PIP_CACHE_DIR={mount.group(1)}" in block, block[:200]
+            assert "PIP_NO_CACHE_DIR=0" in block, block[:200]
 
     def test_the_permission_error_names_both_remedies(self) -> None:
         """The message is the whole fix for the most common setup problem.

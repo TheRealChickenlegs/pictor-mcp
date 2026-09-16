@@ -2,9 +2,10 @@
 #
 # pictor-mcp container images.
 #
-# Four stages share one definition. Stage order matters twice over:
+# Seven stages share one definition, and the split is not cosmetic - it is what
+# keeps a source edit from re-downloading gigabytes. Two rules govern the order:
 #
-#   * a stage may only be based on an EARLIER stage, so `base` is defined first;
+#   * a stage may only be based on an EARLIER stage, so `system` is defined first;
 #   * a plain `docker build .` builds the LAST stage, so `default` is last and
 #     is simply the CPU image again.
 #
@@ -13,16 +14,55 @@
 # PULL an image literally named `base` from a registry, which is both a broken
 # build and a supply-chain hazard. Hence the explicit `default` alias stage.
 #
-#   base     -> CPU image. Small, non-root, hardened. `docker build .` gives you
-#               this, via the `default` alias at the end of the file.
-#   gpu      -> base + PyTorch CUDA wheels (the `[gpu]` extra).
-#   ml       -> gpu + rembg/onnxruntime-gpu with the u2net weights baked in, so
-#               the container needs no network at runtime.
+#   system     -> interpreter, system libraries, runtime identity.
+#   base-deps  -> system + the third-party runtime dependencies, WITHOUT the
+#                 application itself. See "Why the application is installed last".
+#   gpu-deps   -> base-deps + PyTorch CUDA wheels (the `[gpu]` extra).
+#   ml-deps    -> gpu-deps + rembg/onnxruntime-gpu, with the u2net weights baked
+#                 in so the container needs no network at runtime.
+#   base       -> base-deps + the application. CPU image. `docker build .` gives
+#                 you this, via the `default` alias at the end of the file.
+#   gpu        -> gpu-deps  + the application.
+#   ml         -> ml-deps   + the application.
+#   default    -> an alias for `base`.
+#
+# The published target names are unchanged: `--target base|gpu|ml` still produce
+# the CPU, CUDA and ML images. Only the internal `*-deps` stages are new, and
+# they are never a valid thing to run - they have no application in them.
+#
+# Why the application is installed last
+# -------------------------------------
+# A Docker layer is invalidated by any change to the layers beneath it, and for
+# a long time `COPY src/` sat *below* the PyTorch install. Every source edit
+# therefore invalidated the CUDA layer, and the next build re-downloaded and
+# reinstalled several gigabytes of NVIDIA wheels - the single most expensive
+# thing about working on this repository, and the reason `git commit` used to
+# cost more than the code change did.
+#
+# Now `COPY src/` happens only in the three application stages, above every
+# dependency layer. A source edit rebuilds one small layer and leaves the CUDA
+# and model layers untouched, whether the build runs on a laptop, in CI, or
+# through the Portainer build API.
+#
+# The dependency stages still need a package to install, because `pip install .`
+# is what resolves the dependency set from pyproject.toml - a hand-written
+# `pip install` list here would be a second copy of pyproject.toml, and the two
+# would drift. So they install against an empty placeholder package that the
+# application stages then overwrite. That is why the application stages use
+# `--force-reinstall`, and why they end with an import check: if the placeholder
+# ever survived, the image would start and fail on an empty package, and that is
+# a worse failure than a failed build.
 #
 # Build recipes:
 #   docker build .                                       # CPU (default)
 #   docker build --target gpu -t pictor-mcp:gpu .
 #   docker build --target ml  -t pictor-mcp:ml  .
+#
+# A pip cache mount is attached to every dependency install. On a host with a
+# persistent build cache (any normal Docker daemon) that means even a rebuild of
+# the CUDA layer - after a pyproject.toml change, say - reuses the wheels already
+# on disk instead of downloading them again. The mount is never written into an
+# image layer, so no cache bloat ships.
 #
 # Only `gpu` and `ml` need the network at BUILD time, and only to fetch large
 # wheels and model weights. Every variant runs offline afterwards.
@@ -33,9 +73,12 @@
 
 
 # =============================================================================
-# base - the CPU image. This is what `docker build .` produces, via `default`.
+# system - interpreter, system libraries and the runtime identity.
+#
+# Nothing here depends on the project, so nothing here is invalidated by a code
+# change. Everything downstream inherits it, including all three variants.
 # =============================================================================
-FROM python:3.14-slim AS base
+FROM python:3.14-slim AS system
 
 LABEL org.opencontainers.image.title="pictor-mcp" \
       org.opencontainers.image.description="Secure MCP server for image operations: convert, resize, compress, crop, watermark, batch and more." \
@@ -44,6 +87,9 @@ LABEL org.opencontainers.image.title="pictor-mcp" \
 
 # PIP_ROOT_USER_ACTION silences pip's "running as root" advice: installing as
 # root during the build is intended, because the runtime user does not exist yet.
+# PIP_NO_CACHE_DIR=1 is the default for every install, so a `pip install` that
+# forgets its cache mount cannot bloat a layer. The dependency installs below
+# deliberately override it, because they mount a cache instead.
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -75,16 +121,42 @@ RUN groupadd --system --gid 10001 pictor \
 
 WORKDIR /app
 
+# HOME points at the /tmp tmpfs: the runtime user has no home directory, and any
+# library writing ~/.cache or ~/.config would otherwise fail on the read-only
+# root filesystem. NUMBA_CACHE_DIR keeps native caches there too.
+#
+# Set here rather than after the dependency installs, and paired with an explicit
+# PIP_CACHE_DIR below, so the build cache location never depends on HOME.
+ENV HOME=/tmp \
+    NUMBA_CACHE_DIR=/tmp
+
+
+# =============================================================================
+# base-deps - the third-party runtime dependencies, and not the application.
+#
+# This is the layer the whole caching strategy rests on: it must not change when
+# src/ changes. Anything added here is inherited by the CUDA and ML stages, so a
+# mistake here costs a multi-gigabyte rebuild on every commit.
+# =============================================================================
+FROM system AS base-deps
+
 # The build context is pyproject.toml + README.md + src/ (see .dockerignore);
 # nothing else is copied, so no secrets, tests or host-local files can reach a
 # layer. README.md is needed because pyproject.toml declares `readme = ...`.
 COPY pyproject.toml README.md ./
-COPY src/ ./src/
 
-# `pip install .` installs the package and its console script. The /app/src copy
-# stays in the image so the sources are inspectable and `python -m pictor_mcp`
-# resolves exactly as it does from a checkout.
-RUN pip install --no-cache-dir .
+# The placeholder package: an empty module, created here and gone by the time the
+# image is finished. It exists so that `pip install .` can resolve the dependency
+# list from pyproject.toml - the alternative, listing the dependencies again in
+# this file, is the classic way the two copies drift apart.
+#
+# The pip cache mount is keyed to /opt/pip-cache and given a matching
+# PIP_CACHE_DIR, so it does not depend on HOME (which is /tmp above) or on the
+# build running as any particular user.
+RUN --mount=type=cache,target=/opt/pip-cache \
+    mkdir -p src/pictor_mcp \
+    && touch src/pictor_mcp/__init__.py \
+    && PIP_NO_CACHE_DIR=0 PIP_CACHE_DIR=/opt/pip-cache pip install .
 
 # Data layout.
 #
@@ -118,11 +190,6 @@ ENV PICTOR_TRANSPORT=streamable-http \
     PICTOR_INPUT_ROOTS=/data/input \
     PICTOR_OUTPUT_ROOT=/data/output \
     PICTOR_FONT_DIRS=/usr/share/fonts
-# HOME points at the /tmp tmpfs: the runtime user has no home directory, and any
-# library writing ~/.cache or ~/.config would otherwise fail on the read-only
-# root filesystem. NUMBA_CACHE_DIR keeps native caches there too.
-ENV HOME=/tmp \
-    NUMBA_CACHE_DIR=/tmp
 
 # The image's default identity. Non-root, with no shell and no home directory.
 # Operators who want output files owned by their own host user override this with
@@ -148,7 +215,7 @@ ENTRYPOINT ["python", "-m", "pictor_mcp"]
 
 
 # =============================================================================
-# gpu - CPU base plus PyTorch CUDA wheels.
+# gpu-deps - base-deps plus PyTorch CUDA wheels.
 #
 # The CUDA index and the base image's Python version are coupled, and that is the
 # trap this stage fell into: a Dependabot bump moved the base from python:3.12 to
@@ -184,13 +251,17 @@ ENTRYPOINT ["python", "-m", "pictor_mcp"]
 # anything below cu128 cannot drive a Blackwell card at all.
 #
 # The CPU image - the default target - never touches the CUDA index.
+#
+# This stage is the multi-gigabyte one, and it is deliberately below `COPY src/`
+# in every chain that includes it. See the note at the top of this file.
 # =============================================================================
-FROM base AS gpu
+FROM base-deps AS gpu-deps
 
 ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128
 ARG TORCH_VERSION=
 
-# The base stage ends as the unprivileged `pictor` user; installation needs root.
+# The dependency stages end as the unprivileged `pictor` user; installation needs
+# root.
 USER root
 
 # `--index-url` *replaces* PyPI rather than adding to it, and PyTorch's index
@@ -202,10 +273,15 @@ USER root
 # The second install is satisfied by the first and is kept so that adding a
 # dependency to the `gpu` extra in pyproject.toml cannot be silently ignored
 # here. It uses the default index, so it also cannot fail for lack of a wheel.
-RUN pip install --no-cache-dir \
-        --index-url "${TORCH_INDEX_URL}" \
-        "torch${TORCH_VERSION:+==${TORCH_VERSION}}" \
-    && pip install --no-cache-dir ".[gpu]"
+#
+# Both installs share one cache mount, so the NVIDIA wheels this pulls down are
+# reused by the next build on the same host even when this layer has to be
+# rebuilt.
+RUN --mount=type=cache,target=/opt/pip-cache \
+    PIP_NO_CACHE_DIR=0 PIP_CACHE_DIR=/opt/pip-cache \
+      pip install --index-url "${TORCH_INDEX_URL}" "torch${TORCH_VERSION:+==${TORCH_VERSION}}" \
+    && PIP_NO_CACHE_DIR=0 PIP_CACHE_DIR=/opt/pip-cache \
+      pip install ".[gpu]"
 
 ENV PICTOR_GPU=auto
 
@@ -213,14 +289,14 @@ USER pictor
 
 
 # =============================================================================
-# ml - GPU image plus ML background removal, with u2net baked in.
+# ml-deps - gpu-deps plus ML background removal, with u2net baked in.
 #
 # BUILD-TIME INTERNET IS REQUIRED FOR THIS STAGE ONLY: it downloads the
 # onnxruntime-gpu wheel and the ~176 MB u2net.onnx weights from the rembg
 # release assets. The resulting image is fully offline-capable, which is what
 # makes it usable on an isolated internal network.
 # =============================================================================
-FROM gpu AS ml
+FROM gpu-deps AS ml-deps
 
 USER root
 
@@ -229,7 +305,9 @@ USER root
 # ship the same `onnxruntime` import package, and the CPU wheel would shadow the
 # CUDA one. rembg 2.0.57+ does not depend on onnxruntime itself, so its other
 # dependencies come from PyPI while the runtime comes from the GPU wheel here.
-RUN pip install --no-cache-dir "onnxruntime-gpu>=1.18" "rembg>=2.0.57"
+RUN --mount=type=cache,target=/opt/pip-cache \
+    PIP_NO_CACHE_DIR=0 PIP_CACHE_DIR=/opt/pip-cache \
+      pip install "onnxruntime-gpu>=1.18" "rembg>=2.0.57"
 
 # onnxruntime and scipy (used by rembg's alpha matting) dlopen libgomp.so.1 at
 # import time, and python:*-slim does not ship it. libglib2.0-0 is the one
@@ -257,6 +335,56 @@ RUN mkdir -p /opt/models \
     && U2NET_HOME=/opt/models python -c "from rembg import new_session; new_session('u2net')" \
     && chmod -R a+rX /opt/models
 
+USER pictor
+
+
+# =============================================================================
+# base, gpu, ml - the published images: dependencies plus the application.
+#
+# Each is two instructions' worth of work, and that is the point: `COPY src/`
+# lives here, above every dependency layer, so a source edit rebuilds this layer
+# and nothing else. Do not move a COPY or a pip install below this line into a
+# dependency stage - that is precisely the mistake these stages exist to fix.
+#
+# `--force-reinstall --no-deps` replaces the placeholder package from base-deps.
+# `--no-deps` keeps it from touching the dependency layers; `--force-reinstall`
+# is what makes the replacement unconditional rather than something pip is
+# allowed to decide it can skip.
+#
+# The import check is the guard rail: the placeholder module has no `__version__`
+# and no `__main__`, so if the replacement ever stopped happening this build
+# fails here, in a few seconds, instead of producing an image that dies on start.
+# =============================================================================
+FROM base-deps AS base
+
+USER root
+COPY src/ ./src/
+RUN --mount=type=cache,target=/opt/pip-cache \
+    PIP_NO_CACHE_DIR=0 PIP_CACHE_DIR=/opt/pip-cache \
+      pip install --force-reinstall --no-deps . \
+    && python -c "import pictor_mcp, pictor_mcp.server; print('pictor-mcp', pictor_mcp.__version__)"
+USER pictor
+
+
+FROM gpu-deps AS gpu
+
+USER root
+COPY src/ ./src/
+RUN --mount=type=cache,target=/opt/pip-cache \
+    PIP_NO_CACHE_DIR=0 PIP_CACHE_DIR=/opt/pip-cache \
+      pip install --force-reinstall --no-deps . \
+    && python -c "import pictor_mcp, pictor_mcp.server; print('pictor-mcp', pictor_mcp.__version__)"
+USER pictor
+
+
+FROM ml-deps AS ml
+
+USER root
+COPY src/ ./src/
+RUN --mount=type=cache,target=/opt/pip-cache \
+    PIP_NO_CACHE_DIR=0 PIP_CACHE_DIR=/opt/pip-cache \
+      pip install --force-reinstall --no-deps . \
+    && python -c "import pictor_mcp, pictor_mcp.server; print('pictor-mcp', pictor_mcp.__version__)"
 USER pictor
 
 
