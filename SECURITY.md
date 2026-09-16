@@ -154,7 +154,7 @@ a pinned internal mirror and is a real downgrade; do not use it on the internet.
 |---|---|
 | Bind address | `127.0.0.1` by default. The compose port mapping is loopback-only. |
 | Authentication | Optional pre-shared bearer token (also accepted as `X-API-Key`), compared with `secrets.compare_digest`. The comparison always runs, even with no token presented. |
-| DNS rebinding | `Host` and `Origin` validated on **every** route. The MCP SDK guards its own endpoint; this server adds a guard for the whole app, because custom routes (health, file serving) would otherwise sit outside that check. |
+| DNS rebinding | `Host` and `Origin` validated on **every** route by a single guard that wraps the whole app, including the MCP endpoint and the custom routes (health, file serving). The SDK's built-in check is deliberately switched off rather than fed the same list: its matcher understands only exact values and `name:*`, so it would silently reject patterns this server documents (`*`, `*.example.com`, a port-less `Host`) with a bare `421` — two policies, one of them weaker and unexplained. |
 | Browser cross-site requests | A *present* `Origin` not on the allow-list is refused. Absent `Origin` is allowed, since non-browser MCP clients send none. |
 | Missing `Host` | Refused. |
 | Response headers | `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Cross-Origin-Resource-Policy: same-origin`, and `Cache-Control: no-store` on auth rejections. HSTS is opt-in (`PICTOR_ENABLE_HSTS`) and only meaningful behind TLS termination. |
@@ -216,7 +216,10 @@ metadata: they change the pixels, and stripping them would corrupt output.
 - The build context is minimal (`.dockerignore`), so no secret, test fixture or
   host file can reach a layer.
 - The MCP SDK's own transport-security default is **DNS-rebinding protection
-  disabled** for backwards compatibility. This server enables it explicitly.
+  disabled** for backwards compatibility. This server enables it explicitly, in
+  `pictor_mcp.security.auth`, and turns the SDK's parallel check off so that one
+  matcher decides. The guard is registered on the outer application and so also
+  covers the SDK's own routes.
 
 ---
 

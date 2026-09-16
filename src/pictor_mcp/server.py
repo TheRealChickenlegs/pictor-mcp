@@ -303,6 +303,15 @@ def _attach_http_extras(app, config: Config, ctx: ToolContext) -> None:
             ", ".join(config.http.allowed_hosts) or "<none>",
             ", ".join(config.http.allowed_origins) or "<none - browser origins refused>",
         )
+        if "*" in config.http.allowed_hosts:
+            # The concrete way to arrive here by accident is PICTOR_HOST=0.0.0.0
+            # with no explicit list, which derives "*". Say so plainly rather
+            # than leaving a permissive pattern buried in an INFO line.
+            logger.warning(
+                "PICTOR_ALLOWED_HOSTS contains '*': every Host header is accepted, so "
+                "DNS-rebinding protection is effectively off. Set the hostnames clients "
+                "actually use, e.g. PICTOR_ALLOWED_HOSTS=127.0.0.1:*,pictor-mcp:*"
+            )
     else:
         logger.warning(
             "PICTOR_DNS_REBINDING_PROTECTION=false: Host and Origin headers are not validated. "
@@ -312,21 +321,35 @@ def _attach_http_extras(app, config: Config, ctx: ToolContext) -> None:
     app.add_middleware(SecurityHeadersMiddleware, hsts=config.http.enable_hsts)
 
 
-def build_http_app(config: Config, ctx: ToolContext, server) -> Any:
-    """Build the Streamable HTTP ASGI application."""
+def _sdk_transport_security() -> Any:
+    """Silence the SDK's own Host/Origin check, which we supersede.
+
+    The SDK validates both headers inside every HTTP transport it builds, using
+    a matcher that accepts an exact value or ``name:*`` with a literal port -
+    nothing else. The guard in :mod:`pictor_mcp.security.auth` runs earlier (it
+    wraps this application, so it also covers the SDK's own routes) and
+    understands ``*`` and ``*.suffix`` on top of that, making the SDK's set a
+    strict subset of ours.
+
+    Two matchers fed one list cannot add security, because every request the SDK
+    would accept is already accepted. They can only subtract: a pattern ours
+    allows and the SDK cannot express - ``PICTOR_ALLOWED_HOSTS=*`` is the clear
+    case - was refused by the inner check with a bare ``421 Invalid Host header``
+    that contradicts our own answer and names no remedy. One policy, one place.
+    """
     from mcp.server.transport_security import TransportSecuritySettings
 
-    security = TransportSecuritySettings(
-        enable_dns_rebinding_protection=config.http.dns_rebinding_protection,
-        allowed_hosts=list(config.http.allowed_hosts),
-        allowed_origins=list(config.http.allowed_origins),
-    )
+    return TransportSecuritySettings(enable_dns_rebinding_protection=False)
+
+
+def build_http_app(config: Config, ctx: ToolContext, server) -> Any:
+    """Build the Streamable HTTP ASGI application."""
     app = server.streamable_http_app(
         streamable_http_path=config.http.path,
         stateless_http=config.http.stateless_http,
         json_response=config.http.json_response,
         max_request_body_size=config.http.max_request_body_bytes,
-        transport_security=security,
+        transport_security=_sdk_transport_security(),
         host=config.http.host,
     )
     _attach_http_extras(app, config, ctx)
@@ -335,16 +358,9 @@ def build_http_app(config: Config, ctx: ToolContext, server) -> Any:
 
 def build_sse_app(config: Config, ctx: ToolContext, server) -> Any:
     """Build the deprecated HTTP+SSE application for older clients."""
-    from mcp.server.transport_security import TransportSecuritySettings
-
-    security = TransportSecuritySettings(
-        enable_dns_rebinding_protection=config.http.dns_rebinding_protection,
-        allowed_hosts=list(config.http.allowed_hosts),
-        allowed_origins=list(config.http.allowed_origins),
-    )
     app = server.sse_app(
         max_request_body_size=config.http.max_request_body_bytes,
-        transport_security=security,
+        transport_security=_sdk_transport_security(),
         host=config.http.host,
     )
     _attach_http_extras(app, config, ctx)

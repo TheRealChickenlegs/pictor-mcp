@@ -573,6 +573,14 @@ Non-browser MCP clients (DSH, OpenCode, Hermes, Open WebUI's backend) send no
 `Origin` header and are unaffected either way, which is why the loopback default
 is safe. A browser-based client is the case that needs the allow-list.
 
+Both lists accept a small pattern grammar: a bare `host` or `host:port` matches
+exactly, `host:*` matches that host on any port, `*.example.com` matches any
+subdomain on any port (never the apex itself), and `*` matches everything — only
+sane behind a hardened proxy. `PICTOR_ALLOWED_ORIGINS` takes the same forms with
+an optional scheme, e.g. `https://*.example.com`. These patterns are interpreted
+by this server; the MCP SDK's weaker built-in Host check is disabled so there is
+only one answer to "is this request allowed?".
+
 **3. Always set `PICTOR_AUTH_TOKEN`** once anything but you can reach the port.
 Anyone who can reach an unauthenticated instance has the full tool surface, which
 reads and writes files.

@@ -8,7 +8,10 @@ signature does not.
 
 from __future__ import annotations
 
+import contextlib
+import http.client
 import json
+import logging
 import socket
 import threading
 import time
@@ -208,6 +211,116 @@ class TestDnsRebindingDefence:
         assert status == 401
 
 
+def _post_as_host(live: _LiveServer, host: str, *, token: str | None = None):
+    """POST to /mcp with an explicit Host header.
+
+    urllib derives Host from the URL, so a raw client is the only way to send
+    the value another container or a reverse proxy would send.
+    """
+    payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}).encode()
+    headers = {
+        "Host": host,
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    connection = http.client.HTTPConnection("127.0.0.1", live.port, timeout=20)
+    try:
+        connection.request("POST", "/mcp", body=payload, headers=headers)
+        response = connection.getresponse()
+        return response.status, response.read(), {k.lower(): v for k, v in response.getheaders()}
+    finally:
+        connection.close()
+
+
+@contextlib.contextmanager
+def _live_with_hosts(sandbox: Sandbox, hosts: str | None = None, *, host: str = "127.0.0.1"):
+    overrides = {
+        "PICTOR_TRANSPORT": "streamable-http",
+        "PICTOR_HOST": host,
+        "PICTOR_PORT": str(_free_port()),
+        "PICTOR_AUTH_TOKEN": TOKEN,
+    }
+    if hosts is not None:
+        overrides["PICTOR_ALLOWED_HOSTS"] = hosts
+    config = load_config(base_env(sandbox, **overrides))
+    with _LiveServer(config) as live:
+        yield live
+
+
+class TestTheHostPolicyHasASingleEnforcementPoint:
+    """The SDK validates Host itself, with a weaker matcher than ours.
+
+    Both layers used to receive the same list, so a pattern that ours understands
+    and the SDK cannot express was allowed by the outer guard and then refused by
+    the inner one with a bare ``421 Invalid Host header`` - no remedy, and a
+    contradiction of the answer the operator had just been given. These are the
+    exact patterns that used to fail.
+    """
+
+    @pytest.mark.parametrize(
+        ("allowed", "host"),
+        [
+            ("pictor-mcp:*", "pictor-mcp:8077"),
+            # Legal HTTP: a Host may omit the port. The SDK's `name:*` handling
+            # requires the colon, so this 421'd before.
+            ("pictor-mcp:*", "pictor-mcp"),
+            ("*", "anything.example.com"),
+            ("*.example.com", "cdn.example.com:8077"),
+            ("*.example.com", "cdn.example.com"),
+        ],
+        ids=["service:port", "service-no-port", "wildcard-all", "subdomain:port", "subdomain"],
+    )
+    def test_an_allowed_host_reaches_the_mcp_endpoint(self, sandbox: Sandbox, allowed: str, host: str) -> None:
+        with _live_with_hosts(sandbox, allowed) as live:
+            status, body, _ = _post_as_host(live, host, token=TOKEN)
+            assert status == 200, f"{host} against {allowed!r}: {status} {body[:200]!r}"
+
+    @pytest.mark.parametrize(
+        ("allowed", "host"),
+        [
+            ("pictor-mcp:*", "evil.example.com"),
+            ("pictor-mcp:*", "pictor-mcp.evil.com"),
+            ("*.example.com", "example.com:8077"),
+            ("*.example.com", "evilexample.com"),
+        ],
+    )
+    def test_a_foreign_host_is_refused_on_the_mcp_endpoint_too(self, sandbox: Sandbox, allowed: str, host: str) -> None:
+        """Disabling the inner check must not move the endpoint out of scope."""
+        with _live_with_hosts(sandbox, allowed) as live:
+            status, body, _ = _post_as_host(live, host, token=TOKEN)
+            assert status == 403, f"{host}: {status} {body[:200]!r}"
+            assert b"host header" in body.lower()
+
+    def test_a_wildcard_bind_with_no_list_is_loud_and_actually_works(self, sandbox: Sandbox, caplog) -> None:
+        """`PICTOR_HOST=0.0.0.0` alone derives `*`, which is a lot to do quietly.
+
+        Before the inner check was removed this combination was unusable - every
+        request was 421'd - so an operator could not have been relying on it. It
+        works now, which makes the warning the only thing standing between them
+        and a policy that accepts any Host.
+        """
+        with (
+            caplog.at_level(logging.WARNING, logger="pictor_mcp.server"),
+            _live_with_hosts(sandbox, host="0.0.0.0") as live,
+        ):
+            status, body, _ = _post_as_host(live, "somewhere.internal:8077", token=TOKEN)
+        assert status == 200, body[:200]
+        assert any("effectively off" in record.getMessage() for record in caplog.records), [
+            record.getMessage() for record in caplog.records
+        ]
+
+    def test_the_compose_default_needs_no_warning(self, sandbox: Sandbox, caplog) -> None:
+        """The shipped default must not trip the `*` warning."""
+        with (
+            caplog.at_level(logging.WARNING, logger="pictor_mcp.server"),
+            _live_with_hosts(sandbox, "127.0.0.1:*,localhost:*,pictor-mcp:*") as live,
+        ):
+            assert _post_as_host(live, "pictor-mcp:8077", token=TOKEN)[0] == 200
+        assert not [r for r in caplog.records if "effectively off" in r.getMessage()]
+
+
 class TestSecurityHeaders:
     @pytest.mark.parametrize(
         ("header", "expected"),
@@ -379,6 +492,56 @@ class TestHeaderMatching:
         assert _host_matches("cdn.example.com", patterns) is True
         assert _host_matches("example.com", patterns) is False
         assert _host_matches("evilexample.com", patterns) is False
+
+    @pytest.mark.parametrize(
+        ("host", "patterns", "expected"),
+        [
+            # A Host on a non-default port carries the port, so a subdomain
+            # wildcard that ignored it could never match a real request to this
+            # server - the pattern was documented but unusable.
+            ("cdn.example.com:8077", ("*.example.com",), True),
+            ("cdn.example.com", ("*.example.com",), True),
+            ("a.b.example.com:8077", ("*.example.com",), True),
+            ("example.com:8077", ("*.example.com",), False),
+            ("evilexample.com:8077", ("*.example.com",), False),
+            ("cdn.example.com:8077", ("*.example.com:8077",), True),
+            ("cdn.example.com:9000", ("*.example.com:8077",), False),
+            ("cdn.example.com:9000", ("*.example.com:*",), True),
+            # Bracketed IPv6 must survive the port split.
+            ("[::1]:8077", ("[::1]:*",), True),
+            ("[::1]", ("[::1]:*",), True),
+            ("[::1]:8077", ("[::1]:8077",), True),
+            ("[::1]:8077", ("*.example.com",), False),
+            # A bare name and a ported one are the same host.
+            ("pictor-mcp", ("pictor-mcp:*",), True),
+            ("pictor-mcp:8077", ("pictor-mcp:*",), True),
+            ("pictor-mcp.evil.com", ("pictor-mcp:*",), False),
+            ("127.0.0.1:8077@evil.com", ("*.0.0.1:*",), False),
+        ],
+    )
+    def test_port_handling(self, host: str, patterns: tuple[str, ...], expected: bool) -> None:
+        from pictor_mcp.security.auth import _host_matches
+
+        assert _host_matches(host, patterns) is expected
+
+    @pytest.mark.parametrize(
+        ("origin", "patterns", "expected"),
+        [
+            ("http://cdn.example.com:8077", ("*.example.com",), True),
+            ("http://cdn.example.com", ("*.example.com",), True),
+            ("http://example.com:8077", ("*.example.com",), False),
+            ("http://evilexample.com", ("*.example.com",), False),
+            # A scheme in the pattern must still be honoured.
+            ("https://cdn.example.com", ("http://*.example.com",), False),
+            ("https://cdn.example.com:8443", ("https://*.example.com:8443",), True),
+            ("https://cdn.example.com:8443", ("https://*.example.com",), True),
+            ("https://cdn.example.com:8443", ("https://*.example.com:9443",), False),
+        ],
+    )
+    def test_origin_subdomain_wildcards(self, origin: str, patterns: tuple[str, ...], expected: bool) -> None:
+        from pictor_mcp.security.auth import _origin_matches
+
+        assert _origin_matches(origin, patterns) is expected
 
     def test_the_wildcard_pattern_accepts_anything_but_an_empty_value(self) -> None:
         from pictor_mcp.security.auth import _host_matches

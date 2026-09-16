@@ -156,12 +156,39 @@ class SecurityHeadersMiddleware:
         await self.app(scope, receive, send_with_headers)
 
 
+def _split_authority(value: str) -> tuple[str, str | None]:
+    """Split ``host[:port]`` into its parts, keeping a bracketed IPv6 literal whole.
+
+    Naively splitting on the first colon turns ``[::1]:8077`` into ``[``, which
+    is why the brackets have to be respected before the port separator.
+    """
+    if value.startswith("["):
+        end = value.find("]")
+        if end == -1:
+            return value, None
+        rest = value[end + 1 :]
+        return value[: end + 1], rest[1:] if rest.startswith(":") else None
+    name, separator, port = value.partition(":")
+    return name, port if separator else None
+
+
+def _split_origin(value: str) -> tuple[str, str, str | None]:
+    """Split an Origin into ``(scheme, host, port)``; port and scheme may be absent."""
+    scheme, separator, rest = value.partition("://")
+    if not separator:
+        # Not a URL: "null", or a bare host pattern such as *.example.com.
+        return "", value, None
+    host, port = _split_authority(rest)
+    return scheme, host, port
+
+
 def _host_matches(host: str, patterns: tuple[str, ...]) -> bool:
     """Match a Host header against an allow-list.
 
     Supported patterns: an exact ``host`` or ``host:port``, ``host:*`` for any
-    port on a host, ``*.example.com`` for a subdomain, and ``*`` to accept any
-    value. A missing Host header is always a rejection.
+    port on a host, ``*.example.com`` for a subdomain (on any port, or on a
+    named one as ``*.example.com:8077``), and ``*`` to accept any value. A
+    missing Host header is always a rejection.
 
     The value is sanitised first. A legitimate Host header never contains ``@``
     (that is URL userinfo, not part of the authority) or a control character,
@@ -177,41 +204,70 @@ def _host_matches(host: str, patterns: tuple[str, ...]) -> bool:
         logger.warning("rejected malformed Host header")
         return False
 
+    name, port = _split_authority(value)
     for pattern in patterns:
-        pattern = pattern.strip().lower()
-        if pattern == "*":
-            return True
-        if pattern.endswith(":*"):
-            base = pattern[:-2]
-            if value == base or value.startswith(base + ":"):
+        raw = pattern.strip().lower()
+        pattern_name, pattern_port = _split_authority(raw)
+        if pattern_name == "*":
+            # Any host; a named port narrows it without excluding the default.
+            if pattern_port in {None, "", "*"} or pattern_port == port:
                 return True
-        elif pattern.startswith("*."):
-            suffix = pattern[1:]
-            if value.endswith(suffix) and value != suffix[1:]:
+            continue
+        if pattern_name.startswith("*."):
+            # A subdomain wildcard may pin a port, or leave it open. This has to
+            # be tested before the "any port" branch below, which would otherwise
+            # claim "*.example.com:*" and compare it as a literal name.
+            if pattern_port not in {None, "", "*"} and pattern_port != port:
+                continue
+            # The apex is not a subdomain: *.example.com must not admit
+            # example.com, and must not admit evilexample.com either.
+            suffix = pattern_name[1:]
+            if name.endswith(suffix) and name != suffix[1:]:
                 return True
-        elif value == pattern:
+            continue
+        if pattern_port == "*":
+            # Any port on this exact name; the port-less form is that too.
+            if name == pattern_name:
+                return True
+            continue
+        if value == raw:
             return True
     return False
 
 
 def _origin_matches(origin: str, patterns: tuple[str, ...]) -> bool:
-    """Match an Origin header. An empty allow-list rejects every origin."""
+    """Match an Origin header. An empty allow-list rejects every origin.
+
+    The same pattern grammar as :func:`_host_matches`, with an optional scheme:
+    ``http://127.0.0.1:*``, ``https://*.example.com``, or ``*``.
+    """
     value = origin.strip().lower().rstrip("/")
     if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
         logger.warning("rejected malformed Origin header")
         return False
+    scheme, host, port = _split_origin(value)
     for pattern in patterns:
-        pattern = pattern.strip().lower().rstrip("/")
-        if pattern == "*":
-            return True
-        if pattern.endswith(":*"):
-            if value == pattern[:-2] or value.startswith(pattern[:-2] + ":"):
+        raw = pattern.strip().lower().rstrip("/")
+        pattern_scheme, pattern_host, pattern_port = _split_origin(raw)
+        if pattern_scheme and pattern_scheme != scheme:
+            continue
+        if pattern_host == "*":
+            if pattern_port in {None, "", "*"} or pattern_port == port:
                 return True
-        elif pattern.startswith("*."):
+            continue
+        if pattern_host.startswith("*."):
             # Subdomain wildcard, e.g. *.example.com for cdn.example.com.
-            if value.endswith(pattern[1:]) and value != pattern[2:]:
+            if pattern_port not in {None, "", "*"} and pattern_port != port:
+                continue
+            suffix = pattern_host[1:]
+            if host.endswith(suffix) and host != suffix[1:]:
                 return True
-        elif value == pattern:
+            continue
+        if pattern_port == "*":
+            if host == pattern_host:
+                return True
+            continue
+        if value == raw:
             return True
     return False
 
