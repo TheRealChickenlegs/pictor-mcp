@@ -261,10 +261,7 @@ class ResultBuilder:
                 f"Output: {output.width}x{output.height} {output.format.upper()} {human_bytes(output.byte_size)} -> {output.path}"
             )
             if output.url:
-                lines.append(f"URL: {output.url}")
-                # Markdown image syntax so web UIs (Open WebUI, and anything
-                # else rendering markdown) display it without extra wiring.
-                lines.append(f"![{output.name}]({output.url})")
+                lines.append(f"Image URL: {output.url}")
 
         change = result.size_change
         if change and change.input_bytes and change.output_bytes:
@@ -284,6 +281,18 @@ class ResultBuilder:
 
         for note in result.notes:
             lines.append(f"Note: {note}")
+
+        # Last, deliberately. Chat UIs render markdown from the assistant's
+        # reply, not from a tool result, and Open WebUI does not display the MCP
+        # image block at all (open-webui discussion #14732). A URL on its own
+        # therefore disappears: the model summarises the run and the picture
+        # never appears. Spelling out the exact line to send is what makes it
+        # show up, and putting it last is what makes a model repeat it.
+        linked = [output for output in result.outputs if output.url]
+        if linked:
+            lines.append("")
+            lines.append("To display the result, copy this into your reply exactly as written:")
+            lines.extend(f"![{output.name}]({output.url})" for output in linked)
 
         return "\n".join(lines)
 

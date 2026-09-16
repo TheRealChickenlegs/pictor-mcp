@@ -297,11 +297,28 @@ browser-origin configuration is needed.
 2. Set the auth header to `Authorization: Bearer <your token>`.
 3. Make the tools available to a model, then ask it to resize an image.
 
-Two Open WebUI specifics worth knowing:
+Three Open WebUI specifics worth knowing:
 
-- **Images render best via URL.** Turn on
-  [`PICTOR_SERVE_OUTPUTS`](#generated-file-urls) so results include a markdown
-  image link Open WebUI can display. Otherwise the model sees only the text summary.
+- **Images are displayed through markdown, not through the tool result.** Open
+  WebUI renders markdown from the assistant's reply; it does not display the
+  image content block an MCP tool returns ([open-webui discussion
+  #14732](https://github.com/open-webui/open-webui/discussions/14732)). So two
+  things have to be true: [`PICTOR_SERVE_OUTPUTS=true`](#generated-file-urls) so
+  every result carries a signed URL, and a model that repeats the
+  `![name](url)` line the tool result ends with. That line is written into the
+  text on purpose — a URL on its own gets summarised away and the picture never
+  appears. If your model still drops it, say so in its system prompt:
+
+  > When a pictor-mcp tool returns an image, include its `![name](url)` line in
+  > your reply exactly as given, on its own line.
+
+  Setting `PICTOR_PUBLIC_BASE_URL` without `PICTOR_SERVE_OUTPUTS` is the usual
+  reason nothing renders, and the server now says so at startup and in `--check`.
+- **The image is served by this server, so the browser has to reach it.** The
+  signed URL is built from `PICTOR_PUBLIC_BASE_URL`, and `/files/` carries its
+  own HMAC credential rather than the API token, so it works in an `<img>` tag
+  with no extra wiring — provided that hostname routes here and is in
+  `PICTOR_ALLOWED_HOSTS`.
 - **If tool discovery fails**, try `PICTOR_STATELESS_HTTP=true` (the default) and
   `PICTOR_JSON_RESPONSE=true`. Some Open WebUI versions handle plain JSON
   responses better than SSE streams.
@@ -708,6 +725,11 @@ signature with an expiry, scoped to one file, which is what lets a browser
   the bind address (reverse proxy, different published port), or the generated
   links will point at `127.0.0.1:<PICTOR_PORT>`.
 - `PICTOR_URL_TTL_SECONDS` (default 3600) bounds how long a leaked link works.
+- The result text ends with the exact `![name](url)` line to paste into a reply,
+  because that is how a chat UI ends up displaying it — see
+  [Attaching an image in a chat UI](#attaching-an-image-in-a-chat-ui) and the
+  [Open WebUI notes](#open-webui). Setting `PICTOR_PUBLIC_BASE_URL` while this is
+  off is inert, and the server warns about it at startup.
 
 ---
 

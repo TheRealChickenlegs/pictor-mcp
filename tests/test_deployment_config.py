@@ -629,6 +629,25 @@ class TestInertAllowListEntries:
         config = _config(PICTOR_ALLOW_NET_FETCH="true", PICTOR_FETCH_ALLOWED_HOSTS="[2001:db8::1]")
         assert inert_allow_list_entries(config) == []
 
+    def test_a_base_url_without_output_serving_is_reported(self) -> None:
+        """The usual reason a chat UI shows no image.
+
+        `PICTOR_PUBLIC_BASE_URL` only ever appears inside a generated link, so
+        without output serving it is a setting with no effect - and the operator
+        is left wondering why the picture never arrives.
+        """
+        config = _config(PICTOR_PUBLIC_BASE_URL="https://pictor.example.com")
+        messages = inert_allow_list_entries(config)
+        assert any("PICTOR_SERVE_OUTPUTS" in message for message in messages), messages
+
+    def test_the_warning_clears_once_serving_is_on(self) -> None:
+        config = _config(
+            PICTOR_PUBLIC_BASE_URL="https://pictor.example.com",
+            PICTOR_SERVE_OUTPUTS="true",
+            PICTOR_AUTH_TOKEN="a-sufficiently-long-token-value",
+        )
+        assert inert_allow_list_entries(config) == []
+
     def test_the_check_output_carries_the_warnings(self, tmp_path: Path) -> None:
         """`--check` is what an operator runs while working out why a client is
         refused, so the warnings have to be in it - not only in the log."""

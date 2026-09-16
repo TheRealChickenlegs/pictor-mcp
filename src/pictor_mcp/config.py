@@ -297,6 +297,11 @@ def inert_allow_list_entries(config: Config) -> list[str]:
                 "a scheme or a port there can never match; use the bare name and "
                 "PICTOR_FETCH_ALLOWED_PORTS for the port"
             )
+    if config.http.public_base_url and not config.http.serve_outputs:
+        messages.append(
+            "PICTOR_PUBLIC_BASE_URL is set but PICTOR_SERVE_OUTPUTS=false, so results carry no link and "
+            "a chat UI has nothing to render; set PICTOR_SERVE_OUTPUTS=true or drop the base URL"
+        )
     return messages
 
 
