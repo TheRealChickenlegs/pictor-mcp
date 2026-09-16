@@ -35,7 +35,13 @@ logger = logging.getLogger(__name__)
 
 _PathArg = Annotated[
     str | None,
-    Field(description="Path to the image, relative to an allowed input root (or absolute inside one)."),
+    Field(
+        description=(
+            "Path to the image, relative to an allowed input root (or absolute inside one). "
+            "This is the only way to read a file that is on the server's own network: a URL "
+            "pointing at a LAN or container address is refused by the SSRF guard."
+        )
+    ),
 ]
 _Base64Arg = Annotated[
     str | None,
@@ -43,7 +49,13 @@ _Base64Arg = Annotated[
 ]
 _UrlArg = Annotated[
     str | None,
-    Field(description="http(s) URL to fetch. Disabled unless PICTOR_ALLOW_NET_FETCH=true."),
+    Field(
+        description=(
+            "http(s) URL to fetch. Disabled unless PICTOR_ALLOW_NET_FETCH=true, and the address "
+            "must be publicly routable: private, loopback and link-local targets are refused, as "
+            "are URLs that require credentials."
+        )
+    ),
 ]
 _FormatArg = Annotated[
     str | None,

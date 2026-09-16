@@ -39,7 +39,7 @@ from starlette.routing import Route
 
 from . import __version__
 from .backends import build_registry
-from .config import Config, load_config
+from .config import Config, inert_allow_list_entries, load_config
 from .errors import ConfigError, PictorError
 from .imaging.fonts import FontIndex
 from .imaging.loader import ImageLoader
@@ -437,6 +437,10 @@ def _redacted_summary(config: Config, ctx: ToolContext) -> dict[str, Any]:
         "gpu": config.gpu,
         "acceleration": ctx.registry.active,
         "stripMetadataByDefault": config.strip_metadata,
+        # Entries that can never match anything. Printed here as well as logged
+        # at startup, because `--check` is what an operator runs while working
+        # out why a client is being refused.
+        "configurationWarnings": inert_allow_list_entries(config),
     }
 
 
@@ -450,6 +454,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     configure_logging(config.log_level)
+
+    # A pattern that cannot match is a protection someone thinks they have. Say
+    # so before the first client is refused, and in a way that names the fix.
+    for message in inert_allow_list_entries(config):
+        logger.warning("configuration: %s", message)
 
     try:
         ctx = build_context(config)

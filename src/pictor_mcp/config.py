@@ -265,6 +265,48 @@ def _derive_allowed_origins(host: str, configured: list[str]) -> tuple[str, ...]
     return ()
 
 
+#: A Host header is `host[:port]` and never carries a scheme; an Origin always
+#: carries one. An entry in the wrong list therefore matches nothing at all -
+#: which is silent, and looks exactly like protection that is merely not needed
+#: yet. `PICTOR_FETCH_ALLOWED_HOSTS` is compared against the hostname alone, so
+#: a port there is inert too (the port is checked against
+#: PICTOR_FETCH_ALLOWED_PORTS instead). These are reported at startup and by
+#: `--check`, because a pattern that cannot match is worth knowing about before
+#: a client is refused.
+def inert_allow_list_entries(config: Config) -> list[str]:
+    """Allow-list entries that can never match their header, with the reason."""
+    messages: list[str] = []
+
+    for entry in config.http.allowed_hosts:
+        if "://" in entry:
+            messages.append(
+                f"PICTOR_ALLOWED_HOSTS entry {entry!r} contains a scheme and can never match a Host "
+                "header, which is only host[:port]; that form belongs in PICTOR_ALLOWED_ORIGINS"
+            )
+    for entry in config.http.allowed_origins:
+        if entry == "*" or entry.startswith("*.") or "://" in entry:
+            continue
+        messages.append(
+            f"PICTOR_ALLOWED_ORIGINS entry {entry!r} has no scheme and can never match an Origin, "
+            "which always looks like http://host[:port]; that form belongs in PICTOR_ALLOWED_HOSTS"
+        )
+    for entry in config.fetch.allowed_hosts:
+        if "://" in entry or _names_a_port(entry):
+            messages.append(
+                f"PICTOR_FETCH_ALLOWED_HOSTS entry {entry!r} is matched against the hostname alone, so "
+                "a scheme or a port there can never match; use the bare name and "
+                "PICTOR_FETCH_ALLOWED_PORTS for the port"
+            )
+    return messages
+
+
+def _names_a_port(entry: str) -> bool:
+    """True for ``host:port`` and ``[v6]:port``, false for a bare name or ``[v6]``."""
+    if entry.startswith("["):
+        return "]:" in entry
+    return ":" in entry
+
+
 def _parse_ports(raw: str | None) -> list[int]:
     ports: list[int] = []
     for token in (raw or "").split(","):

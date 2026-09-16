@@ -22,7 +22,7 @@ from typing import Any, ClassVar
 import pytest
 import yaml
 
-from pictor_mcp.config import load_config
+from pictor_mcp.config import Config, inert_allow_list_entries, load_config
 
 try:  # Python 3.11+
     # `# novermin` is required: the version-floor check cannot see through the
@@ -119,6 +119,16 @@ def _env(*paths: Path) -> dict[str, str]:
     raw = services[SERVICE].get("environment") or {}
     assert isinstance(raw, dict), f"{SERVICE}.environment did not merge into a mapping"
     return {key: _interpolate(value) for key, value in raw.items()}  # type: ignore[misc]
+
+
+def _config(**overrides: str) -> Config:
+    """The compose defaults, with individual settings replaced.
+
+    Composing an override on top of the shipped file rather than loading a bare
+    mapping keeps these tests honest about the deployment people actually get:
+    a setting that only looks fine in isolation fails here.
+    """
+    return load_config({**_env(BASE_COMPOSE), **overrides})
 
 
 def _env_example_assignments() -> dict[str, str]:
@@ -564,6 +574,76 @@ class TestVariableCoverage:
                 assert value == "" or value.startswith("${"), (
                     f"{path.name} appears to contain a literal secret: {value!r}"
                 )
+
+
+class TestInertAllowListEntries:
+    """A pattern that can never match is protection someone thinks they have.
+
+    Host and Origin take different shapes - `host[:port]` against
+    `scheme://host[:port]` - so the two lists are easy to swap, and the result is
+    silent: the entries simply never match, and the server looks like it is
+    refusing a client for no reason. `PICTOR_FETCH_ALLOWED_HOSTS` is matched
+    against the hostname alone, so a port there is inert for the same reason.
+    """
+
+    def test_a_clean_configuration_says_nothing(self) -> None:
+        assert inert_allow_list_entries(_config()) == []
+
+    @pytest.mark.parametrize(
+        "extra",
+        [(), (GPU_OVERLAY,), (ML_OVERLAY,), (BUILD_OVERLAY,)],
+        ids=["cpu", "gpu", "ml", "build"],
+    )
+    def test_the_shipped_defaults_are_not_inert(self, extra: tuple[Path, ...]) -> None:
+        """The examples are what people copy; they must not teach a dead list."""
+        assert inert_allow_list_entries(load_config(_env(BASE_COMPOSE, *extra))) == []
+
+    def test_a_scheme_in_the_host_list_is_reported(self) -> None:
+        messages = inert_allow_list_entries(_config(PICTOR_ALLOWED_HOSTS="http://192.168.1.10:*"))
+        assert len(messages) == 1, messages
+        assert "PICTOR_ALLOWED_HOSTS" in messages[0]
+        assert "PICTOR_ALLOWED_ORIGINS" in messages[0], "the message must name where the form belongs"
+
+    def test_a_bare_host_in_the_origin_list_is_reported(self) -> None:
+        messages = inert_allow_list_entries(_config(PICTOR_ALLOWED_ORIGINS="pictor-mcp:8077,pictor.example.com"))
+        assert len(messages) == 2, messages
+        assert all("PICTOR_ALLOWED_ORIGINS" in message for message in messages)
+
+    def test_a_wildcard_origin_is_not_reported(self) -> None:
+        """`*.example.com` and `*` are meaningful without a scheme: they are
+        matched against the host part of the Origin."""
+        config = _config(PICTOR_ALLOWED_ORIGINS="*,https://*.example.com")
+        assert inert_allow_list_entries(config) == []
+
+    def test_a_port_in_the_fetch_host_list_is_reported(self) -> None:
+        config = _config(
+            PICTOR_ALLOW_NET_FETCH="true",
+            PICTOR_FETCH_ALLOWED_HOSTS="pictor-mcp:8077,cdn.example.com,[::1]:8080",
+        )
+        messages = inert_allow_list_entries(config)
+        assert len(messages) == 2, messages
+        assert all("PICTOR_FETCH_ALLOWED_HOSTS" in message for message in messages)
+        assert all("PICTOR_FETCH_ALLOWED_PORTS" in message for message in messages)
+
+    def test_a_bracketed_ipv6_host_is_not_mistaken_for_a_port(self) -> None:
+        config = _config(PICTOR_ALLOW_NET_FETCH="true", PICTOR_FETCH_ALLOWED_HOSTS="[2001:db8::1]")
+        assert inert_allow_list_entries(config) == []
+
+    def test_the_check_output_carries_the_warnings(self, tmp_path: Path) -> None:
+        """`--check` is what an operator runs while working out why a client is
+        refused, so the warnings have to be in it - not only in the log."""
+        from pictor_mcp.server import _redacted_summary, build_context
+
+        inputs = tmp_path / "in"
+        inputs.mkdir()
+        config = _config(
+            PICTOR_INPUT_ROOTS=str(inputs),
+            PICTOR_OUTPUT_ROOT=str(tmp_path / "out"),
+            PICTOR_ALLOWED_HOSTS="http://192.168.1.10:*",
+        )
+        summary = _redacted_summary(config, build_context(config))
+        assert summary["configurationWarnings"], summary
+        assert any("PICTOR_ALLOWED_HOSTS" in message for message in summary["configurationWarnings"])
 
 
 class TestProjectMetadata:

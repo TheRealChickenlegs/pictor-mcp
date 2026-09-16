@@ -249,7 +249,15 @@ class SafeFetcher:
             except ValueError as exc:
                 raise NetworkBlockedError("host resolved to an unparseable address") from exc
             if not _is_public_address(ip):
-                raise NetworkBlockedError("host resolves to a private, loopback, link-local or reserved address")
+                # The hint is the whole point of this message. Told only
+                # "private address", a caller reads a transient network problem
+                # and retries the same container-to-container URL; an image on
+                # this network is not reachable by URL at all.
+                raise NetworkBlockedError(
+                    "host resolves to a private, loopback, link-local or reserved address; only "
+                    "publicly routable URLs can be fetched, so an image on this network has to be "
+                    "mounted under PICTOR_INPUT_ROOTS and passed as `path` instead"
+                )
             validated.append((family, sockaddr))
         return validated
 

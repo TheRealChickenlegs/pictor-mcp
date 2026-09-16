@@ -400,6 +400,13 @@ Every tool accepts **exactly one** of:
 - `base64_data` — inline bytes, optionally a `data:` URI.
 - `url` — HTTP(S), **disabled by default** and SSRF-guarded when enabled.
 
+`url` is for images on the public internet and nothing else. The guard refuses
+private, loopback and link-local addresses whatever the allow-list says, because
+this server sits *inside* the network those addresses name — an image that only
+exists on that network (a chat UI's own file endpoint, a NAS, another container)
+has to be mounted under `PICTOR_INPUT_ROOTS` and passed as `path`. URLs needing
+credentials are refused too, since the fetch carries none.
+
 ---
 
 ## How results come back

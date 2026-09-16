@@ -133,8 +133,13 @@ class TestResolutionPolicy:
             "getaddrinfo",
             lambda *a, **k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.5", 80))],
         )
-        with pytest.raises(NetworkBlockedError):
+        with pytest.raises(NetworkBlockedError) as caught:
             SafeFetcher(FetchPolicy(enabled=True))._resolve("internal.example", 80)
+        # The caller is a model, and it will otherwise retry the same
+        # container-to-container URL: "private address" reads as a transient
+        # network fault. The message has to name the route that does work.
+        assert "path" in str(caught.value), caught.value
+        assert "PICTOR_INPUT_ROOTS" in str(caught.value), caught.value
 
     def test_rejects_a_mixed_public_private_answer(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Round-robin DNS must not be able to smuggle in a private address."""
