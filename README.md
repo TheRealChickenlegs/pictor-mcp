@@ -764,7 +764,21 @@ then confirm the token.
 With `PICTOR_SERVE_OUTPUTS=true`, results include a URL so a web UI can render
 the image. Those URLs are **not** bearer-authenticated — they carry an HMAC
 signature with an expiry, scoped to one file, which is what lets a browser
-`<img>` tag work without the API token.
+`<img>` tag work without the API token:
+
+```
+https://pictor.example.com/files/1789692769.auyHow_iQuQkfvL_Ta9YJw/converted/photo.png
+                            └──────── expiry . signature ────────┘
+```
+
+**The credential is a path segment, not a query parameter, and that is
+deliberate.** A signed URL has to survive being copied out of a tool result by a
+language model and pasted into a reply, then rendered through markdown and HTML
+by a chat UI, then forwarded by a reverse proxy. `?e=…&s=…` lost to all three:
+models drop what reads as noisy parameters, HTML escaping turns `&` into
+`&amp;`, and proxies rewrite or strip queries. Anything that keeps the path
+keeps the credential, and there is no `&` to escape. If a link is refused, the
+container log says which of the reasons it was.
 
 - The server **refuses to start** with `PICTOR_SERVE_OUTPUTS=true` unless
   `PICTOR_AUTH_TOKEN` or `PICTOR_URL_SECRET` is set, so this can never silently

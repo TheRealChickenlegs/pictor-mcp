@@ -11,6 +11,7 @@ outputs and not.
 from __future__ import annotations
 
 import re
+import time
 
 import pytest
 
@@ -83,18 +84,34 @@ class TestChatUiDisplay:
 
     def test_the_url_is_built_from_the_public_base(self, sandbox: Sandbox) -> None:
         builder = _builder(sandbox, PICTOR_SERVE_OUTPUTS="true", PICTOR_PUBLIC_BASE_URL="https://pictor.example.com")
-        assert builder._public_url("resized/photo.webp").startswith(
-            "https://pictor.example.com/files/resized/photo.webp?"
-        )
+        url = builder._public_url("resized/photo.webp")
+        assert url.startswith("https://pictor.example.com/files/"), url
+        assert url.endswith("/resized/photo.webp"), url
 
     def test_a_link_is_signed_so_the_browser_needs_no_token(self, sandbox: Sandbox) -> None:
-        """An <img> tag cannot send a bearer token, so the signature is the
-        credential. It must be present, and it must expire."""
+        """An <img> tag cannot send a bearer token, so the token in the path is
+        the credential. It carries an expiry and a signature, and it stops
+        working when the expiry passes."""
         url = _builder(
             sandbox, PICTOR_SERVE_OUTPUTS="true", PICTOR_PUBLIC_BASE_URL="https://pictor.example.com"
         )._public_url("resized/photo.webp")
-        assert re.search(r"[?&]e=\d+", url), url
-        assert re.search(r"[?&]s=[0-9a-f]{16,}", url), url
+        match = re.search(r"/files/(\d+)\.([A-Za-z0-9_-]{16,})/", url)
+        assert match, url
+        assert int(match.group(1)) > int(time.time()), url
+        from pictor_mcp.security.auth import signed_path_problem
+
+        secret = _builder(
+            sandbox, PICTOR_SERVE_OUTPUTS="true", PICTOR_PUBLIC_BASE_URL="https://pictor.example.com"
+        )._config.http.url_secret  # type: ignore[attr-defined]
+        assert signed_path_problem(secret, f"{match.group(1)}.{match.group(2)}", "resized/photo.webp") is None
+
+    def test_the_link_survives_losing_everything_after_the_path(self, sandbox: Sandbox) -> None:
+        """No query string exists, so a client that drops queries - or a model
+        that retypes the URL without them - cannot lose the credential."""
+        url = _builder(
+            sandbox, PICTOR_SERVE_OUTPUTS="true", PICTOR_PUBLIC_BASE_URL="https://pictor.example.com"
+        )._public_url("resized/photo.webp")
+        assert "?" not in url and "&" not in url, url
 
 
 class TestOpenWebUiContentShape:

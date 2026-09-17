@@ -49,7 +49,7 @@ from .security.auth import (
     BearerAuthMiddleware,
     HostOriginGuardMiddleware,
     SecurityHeadersMiddleware,
-    verify_signed_path,
+    signed_path_problem,
 )
 from .security.limits import configure_pillow
 from .security.net import SafeFetcher
@@ -215,28 +215,29 @@ def _files_endpoint(ctx: ToolContext):
     """
 
     async def serve(request: Request) -> Response:
+        token = request.path_params.get("token", "")
         relative = request.path_params.get("path", "")
         secret = ctx.config.http.url_secret
 
-        if secret:
-            expires = request.query_params.get("e", "")
-            signature = request.query_params.get("s", "")
-            if not verify_signed_path(secret, relative, expires, signature):
-                # Previously silent, which made this the least diagnosable
-                # failure in the server: the browser shows only "image
-                # unavailable", and the tool call that produced the link had
-                # already succeeded. The reason belongs in the log.
-                logger.warning(
-                    "refused /files/%s: the link is expired, or its signature does not verify. "
-                    "A proxy that drops or rewrites the query string causes this, as does a "
-                    "request made after PICTOR_URL_TTL_SECONDS has passed.",
-                    relative,
+        problem = signed_path_problem(secret, token, relative)
+        if problem is not None:
+            if request.query_params.get("e") or request.query_params.get("s"):
+                # The previous shape, still being pasted from an old chat. Name
+                # it, rather than complain about a malformed token.
+                problem += (
+                    " - and this request carries e/s query parameters, the shape of a link from an "
+                    "older version whose signature lived in the query string; it now travels in the path"
                 )
-                return JSONResponse(
-                    {"error": "invalid or expired link"},
-                    status_code=403,
-                    headers={"cache-control": "no-store"},
-                )
+            # Previously silent, which made this the least diagnosable failure in
+            # the server: a browser shows only "image unavailable", and the tool
+            # call that produced the link had already succeeded. Each case has a
+            # different fix, so the log says which one it is.
+            logger.warning("refused /files/%s/%s: %s", token, relative, problem)
+            return JSONResponse(
+                {"error": "invalid or expired link"},
+                status_code=403,
+                headers={"cache-control": "no-store"},
+            )
 
         try:
             import anyio
@@ -273,7 +274,9 @@ def _attach_http_extras(app, config: Config, ctx: ToolContext) -> None:
     app.routes.append(Route("/healthz", _healthz, methods=["GET"]))
 
     if config.http.serve_outputs:
-        app.routes.append(Route("/files/{path:path}", _files_endpoint(ctx), methods=["GET"]))
+        # The signature is a path segment, not a query parameter: see
+        # build_signed_path for why that is worth the uglier URL.
+        app.routes.append(Route("/files/{token}/{path:path}", _files_endpoint(ctx), methods=["GET"]))
         logger.info("output file serving enabled at /files/")
     else:
         logger.info("output file serving disabled (set PICTOR_SERVE_OUTPUTS=true to enable)")

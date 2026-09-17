@@ -18,6 +18,7 @@ simple, well-understood alternative, implemented carefully:
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import json
@@ -367,35 +368,77 @@ class HostOriginGuardMiddleware:
 
 # --------------------------------------------------------------------- URLs
 
+#: Bytes of HMAC kept in an output token. 128 bits is far past the point where
+#: guessing one is a strategy, and the token has to survive being copied.
+_TOKEN_BYTES = 16
 
-def _signature(secret: str, relative_path: str, expires: int) -> str:
+
+def _token_signature(secret: str, relative_path: str, expires: int) -> str:
     payload = f"{relative_path}:{expires}".encode()
-    return hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
+    digest = hmac.new(secret.encode(), payload, hashlib.sha256).digest()[:_TOKEN_BYTES]
+    # base64url rather than hex: 22 characters instead of 32, still URL-safe,
+    # and no character that markdown or HTML wants to escape.
+    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
 
-def build_signed_path(secret: str, relative_path: str, ttl_seconds: int) -> str:
-    """Return ``<url-encoded path>?e=<expiry>&s=<signature>``.
+def build_signed_path(secret: str, relative_path: str, ttl_seconds: int, *, now: float | None = None) -> str:
+    """Return ``<token>/<url-encoded path>``, where the token is ``<expiry>.<signature>``.
+
+    **There is no query string, deliberately.** A signed URL is copied out of a
+    tool result by a language model and pasted into a reply, so it has to survive
+    a hostile trip: a model that drops or truncates what it reads as noisy
+    parameters, markdown or HTML escaping that turns ``&`` into ``&amp;``, and a
+    reverse proxy that rewrites or strips queries. Putting the expiry and the
+    signature in the path removes all three failure modes at once - a model that
+    keeps the path keeps the credential, and there is no ``&`` to escape.
 
     The path is percent-encoded as a single segment so a crafted relative path
     cannot escape the serving prefix.
     """
-    expires = int(time.time()) + ttl_seconds
-    signature = _signature(secret, relative_path, expires)
-    return f"{quote(relative_path, safe='/')}?e={expires}&s={signature}"
+    expires = int(time.time() if now is None else now) + ttl_seconds
+    return f"{expires}.{_token_signature(secret, relative_path, expires)}/{quote(relative_path, safe='/')}"
 
 
-def verify_signed_path(secret: str, relative_path: str, expires: str, signature: str) -> bool:
-    """Constant-time verification of a signed output URL."""
+def signed_path_problem(
+    secret: str,
+    token: str,
+    relative_path: str,
+    *,
+    now: float | None = None,
+) -> str | None:
+    """Why this token does not authorise this path, or ``None`` if it does.
+
+    Returns prose rather than a boolean so the caller can put the reason in a
+    log: the browser only ever shows "image unavailable", and every one of these
+    cases has a different fix.
+    """
     if not secret:
-        return False
-    try:
-        expires_int = int(expires)
-    except (TypeError, ValueError):
-        return False
-    if expires_int < int(time.time()):
-        return False
-    expected = _signature(secret, relative_path, expires_int)
-    return secrets.compare_digest(expected, signature or "")
+        return "serving is enabled without a signing secret, which cannot authorise a link"
+    if not token:
+        return (
+            "the URL has no token segment after /files/, which is what an old-style link looks "
+            "like when the query string was dropped or stripped"
+        )
+    expires_text, separator, signature = token.partition(".")
+    if not separator or not signature:
+        return "the token is malformed (expected '<expiry>.<signature>')"
+    if not expires_text.isdigit():
+        return "the token's expiry is not a number"
+    expires = int(expires_text)
+    if expires < int(time.time() if now is None else now):
+        return "the link has expired"
+    expected = _token_signature(secret, relative_path, expires)
+    if not secrets.compare_digest(expected, signature):
+        return (
+            "the token does not match this file, which is what a link that was retyped, "
+            "truncated or otherwise edited in transit looks like"
+        )
+    return None
+
+
+def verify_signed_path(secret: str, token: str, relative_path: str, *, now: float | None = None) -> bool:
+    """Constant-time verification of a signed output URL."""
+    return signed_path_problem(secret, token, relative_path, now=now) is None
 
 
 __all__ = [
@@ -403,5 +446,6 @@ __all__ = [
     "HostOriginGuardMiddleware",
     "SecurityHeadersMiddleware",
     "build_signed_path",
+    "signed_path_problem",
     "verify_signed_path",
 ]

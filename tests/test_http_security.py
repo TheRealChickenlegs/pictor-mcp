@@ -411,44 +411,63 @@ class TestSignedOutputUrls:
 
     async def test_a_forged_signature_is_refused(self, secure_server: _LiveServer) -> None:
         output = await _produce_output(secure_server)
-        status, _, _ = secure_server.request(f"/files/{output['path']}?e=99999999999&s=deadbeef")
+        # A token that was tampered with in place. The URL suffix already starts
+        # with /files/, so it is requested as it is.
+        tampered = output["url"].split(secure_server.base, 1)[1].replace(".", ".0", 1)
+        status, _, _ = secure_server.request(tampered)
         assert status == 403
 
     async def test_a_tampered_path_is_refused(self, secure_server: _LiveServer) -> None:
         output = await _produce_output(secure_server)
         signed = output["url"].split(secure_server.base, 1)[1]
-        # Keep the original signature but point at a different file.
-        tampered = signed.replace(output["path"], "../input/photo.jpg", 1)
-        status, _, _ = secure_server.request(f"/files/{tampered}")
-        assert status in {403, 404}
+        # Keep the original token but point at a different file.
+        tampered = signed.replace(output["path"], "resized/something-else.jpg", 1)
+        status, _, _ = secure_server.request(tampered)
+        assert status == 403
 
-    async def test_an_expired_signature_is_refused(self, secure_server: _LiveServer) -> None:
-        from pictor_mcp.security.auth import _signature
+    async def test_an_expired_link_is_refused(self, secure_server: _LiveServer) -> None:
+        from pictor_mcp.security.auth import build_signed_path
 
         output = await _produce_output(secure_server)
         relative = output["path"]
-        expired = int(time.time()) - 10
-        signature = _signature(SECRET, relative, expired)
-        status, _, _ = secure_server.request(f"/files/{relative}?e={expired}&s={signature}")
+        stale = build_signed_path(SECRET, relative, -10)
+        status, _, _ = secure_server.request(f"/files/{stale}")
         assert status == 403
 
-    async def test_a_signature_from_the_wrong_secret_is_refused(self, secure_server: _LiveServer) -> None:
-        from pictor_mcp.security.auth import _signature
+    async def test_a_link_signed_with_another_secret_is_refused(self, secure_server: _LiveServer) -> None:
+        from pictor_mcp.security.auth import build_signed_path
 
         output = await _produce_output(secure_server)
-        relative = output["path"]
-        expires = int(time.time()) + 600
-        wrong = _signature("a-completely-different-secret-value", relative, expires)
-        status, _, _ = secure_server.request(f"/files/{relative}?e={expires}&s={wrong}")
+        foreign = build_signed_path("a-completely-different-secret-value", output["path"], 600)
+        status, _, _ = secure_server.request(f"/files/{foreign}")
         assert status == 403
+
+    async def test_a_link_with_its_query_string_dropped_still_works(self, secure_server: _LiveServer) -> None:
+        """The regression this format exists for.
+
+        Generated links used to carry `?e=<expiry>&s=<signature>`, and a browser
+        kept getting "image unavailable" while the log said the signature did not
+        verify. Two things produce that: a model that drops what it reads as
+        noisy query parameters when it retypes the URL into its reply, and a proxy
+        that rewrites the query. Putting the credential in the path means a URL
+        that keeps its path keeps its credential, and there is no `&` for
+        anything to escape.
+        """
+        output = await _produce_output(secure_server)
+        path = output["url"].split(secure_server.base, 1)[1]
+        assert "?" not in path, path
+        # Asking for the same URL with a query appended appends to nothing: the
+        # path carries everything.
+        status, body, _ = secure_server.request(f"{path}?tracking=1")
+        assert status == 200, body[:200]
 
     async def test_traversal_through_the_file_endpoint_is_refused(self, secure_server: _LiveServer) -> None:
-        from pictor_mcp.security.auth import _signature
+        from pictor_mcp.security.auth import build_signed_path
 
+        # A correctly signed link for a path outside the output root, to prove
+        # the jail refuses it rather than the signature.
         relative = "../input/photo.jpg"
-        expires = int(time.time()) + 600
-        signature = _signature(SECRET, relative, expires)
-        status, _, _ = secure_server.request(f"/files/{relative}?e={expires}&s={signature}")
+        status, _, _ = secure_server.request(f"/files/{build_signed_path(SECRET, relative, 600)}")
         # 400 is the path jail refusing to resolve outside the output root;
         # 403/404 are also acceptable refusals. Anything 2xx would be a leak.
         assert status in {400, 403, 404}
@@ -508,10 +527,24 @@ class TestSignedOutputUrls:
         import logging
 
         output = await _produce_output(secure_server)
+        tampered = output["url"].split(secure_server.base, 1)[1].replace(".", ".0", 1)
+        with caplog.at_level(logging.WARNING, logger="pictor_mcp.server"):
+            status, _, _ = secure_server.request(tampered)
+        assert status == 403
+        assert any("does not match this file" in record.getMessage() for record in caplog.records), [
+            record.getMessage() for record in caplog.records
+        ]
+
+    async def test_a_link_from_the_older_url_shape_says_so(self, secure_server: _LiveServer, caplog) -> None:
+        """Links used to carry `?e=…&s=…`. Someone will paste one, and the log
+        should name the shape rather than complain about a malformed token."""
+        output = await _produce_output(secure_server)
+        import logging
+
         with caplog.at_level(logging.WARNING, logger="pictor_mcp.server"):
             status, _, _ = secure_server.request(f"/files/{output['path']}?e=99999999999&s=deadbeef")
         assert status == 403
-        assert any("signature does not verify" in record.getMessage() for record in caplog.records), [
+        assert any("query string" in record.getMessage() for record in caplog.records), [
             record.getMessage() for record in caplog.records
         ]
 
@@ -657,60 +690,76 @@ class TestHeaderMatching:
 
 
 class TestSignedUrlCryptography:
-    """A signature authorises exactly one path until exactly one instant."""
+    """A token authorises exactly one path until exactly one instant."""
 
     SECRET = "s" * 32
+    PATH = "resized/a.webp"
 
-    def _signed(self) -> tuple[str, int, str]:
-        from pictor_mcp.security.auth import _signature
+    def _token(self, secret: str | None = None, ttl: int = 600) -> str:
+        """The token segment of a signed path, as the URL carries it."""
+        from pictor_mcp.security.auth import build_signed_path
 
-        expires = int(time.time()) + 600
-        return "resized/a.webp", expires, _signature(self.SECRET, "resized/a.webp", expires)
+        return build_signed_path(secret or self.SECRET, self.PATH, ttl).partition("/")[0]
+
+    def _problem(self, token: str, path: str | None = None, secret: str | None = None) -> str | None:
+        from pictor_mcp.security.auth import signed_path_problem
+
+        return signed_path_problem(
+            self.SECRET if secret is None else secret, token, path if path is not None else self.PATH
+        )
 
     def test_the_exact_path_verifies(self) -> None:
         from pictor_mcp.security.auth import verify_signed_path
 
-        relative, expires, signature = self._signed()
-        assert verify_signed_path(self.SECRET, relative, str(expires), signature) is True
+        assert verify_signed_path(self.SECRET, self._token(), self.PATH) is True
+
+    def test_the_url_carries_no_query_string(self) -> None:
+        """The whole point of the format: nothing to drop, nothing to escape."""
+        from pictor_mcp.security.auth import build_signed_path
+
+        signed = build_signed_path(self.SECRET, self.PATH, 600)
+        assert "?" not in signed and "&" not in signed and "=" not in signed, signed
+        assert signed.endswith("/" + self.PATH), signed
 
     @pytest.mark.parametrize(
         "other", ["resized/b.webp", "../input/photo.jpg", "resized/a.webp ", "resized/a.webp/../b"]
     )
     def test_a_different_path_does_not(self, other: str) -> None:
-        from pictor_mcp.security.auth import verify_signed_path
-
-        _, expires, signature = self._signed()
-        assert verify_signed_path(self.SECRET, other, str(expires), signature) is False
-
-    def test_a_different_expiry_does_not(self) -> None:
-        from pictor_mcp.security.auth import verify_signed_path
-
-        relative, expires, signature = self._signed()
-        assert verify_signed_path(self.SECRET, relative, str(expires + 1), signature) is False
+        assert self._problem(self._token(), other) is not None
 
     def test_a_different_secret_does_not(self) -> None:
-        from pictor_mcp.security.auth import verify_signed_path
-
-        relative, expires, signature = self._signed()
-        assert verify_signed_path("t" * 32, relative, str(expires), signature) is False
+        assert self._problem(self._token("t" * 32)) is not None
 
     def test_an_empty_secret_never_verifies(self) -> None:
         """Otherwise a misconfiguration would make every path downloadable."""
-        from pictor_mcp.security.auth import verify_signed_path
+        assert self._problem(self._token(), secret="") is not None
 
-        relative, expires, signature = self._signed()
-        assert verify_signed_path("", relative, str(expires), signature) is False
+    def test_an_expired_token_does_not(self) -> None:
+        reason = self._problem(self._token(ttl=-10))
+        assert reason is not None and "expired" in reason, reason
 
-    def test_expiry_cannot_be_extended_by_overflow(self) -> None:
-        from pictor_mcp.security.auth import verify_signed_path
+    def test_a_tampered_signature_does_not(self) -> None:
+        token = self._token()
+        expires, _, signature = token.partition(".")
+        tampered = f"{expires}.{signature[:-1]}{'0' if signature[-1] != '0' else '1'}"
+        assert self._problem(tampered) is not None
 
-        relative, _, signature = self._signed()
-        for expiry in ("99999999999999999999", "-1", "", "not-an-int"):
-            assert verify_signed_path(self.SECRET, relative, expiry, signature) is False
+    def test_the_expiry_is_covered_by_the_signature(self) -> None:
+        """A longer life cannot be claimed by editing the expiry alone."""
+        token = self._token()
+        expires, _, signature = token.partition(".")
+        assert self._problem(f"{int(expires) + 86400}.{signature}") is not None
 
-    def test_a_tampered_signature_does_not_verify(self) -> None:
-        from pictor_mcp.security.auth import verify_signed_path
+    @pytest.mark.parametrize("token", ["", "not-a-token", "12345", "12345.", ".abc", "abc.def"])
+    def test_a_malformed_token_is_refused_with_a_reason(self, token: str) -> None:
+        reason = self._problem(token)
+        assert reason is not None and reason, token
 
-        relative, expires, signature = self._signed()
-        tampered = signature[:-1] + ("0" if signature[-1] != "0" else "1")
-        assert verify_signed_path(self.SECRET, relative, str(expires), tampered) is False
+    def test_an_old_style_link_names_itself(self) -> None:
+        """`/files/<path>?e=…&s=…` is the previous shape; someone will paste one."""
+        reason = self._problem("converted", "x.png")
+        assert reason is not None
+        from pictor_mcp.security.auth import build_signed_path
+
+        assert "or None" not in reason  # sanity: it is a message, not a pass
+        assert build_signed_path(self.SECRET, "x.png", 600) != "converted/x.png"
