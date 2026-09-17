@@ -722,6 +722,21 @@ the network is not trusted. When the proxy makes the external host or port diffe
 from the bind address, also set `PICTOR_PUBLIC_BASE_URL` so generated file links
 point somewhere useful.
 
+**Put the public hostname in the allow-list, and give it a port wildcard.**
+Requests that arrive through the proxy carry the *public* Host header, not the
+internal one, so a domain that is not listed is refused — and because the MCP
+client usually talks to `pictor-mcp:8077` directly over the docker network while
+the browser fetches generated files through the proxy, the same server can work
+for tools and fail for every image:
+
+```bash
+PICTOR_ALLOWED_HOSTS=127.0.0.1:*,localhost:*,pictor-mcp:*,pictor.example.com:*
+```
+
+A bare hostname also matches `:80` and `:443`, since those name the same
+authority a proxy may forward. Any *other* port needs the `:*` form — which is
+why the example above uses it.
+
 ### Connecting from another container
 
 This is not the same as exposing the port, and the port mapping is irrelevant to
@@ -758,6 +773,11 @@ signature with an expiry, scoped to one file, which is what lets a browser
   the bind address (reverse proxy, different published port), or the generated
   links will point at `127.0.0.1:<PICTOR_PORT>`.
 - `PICTOR_URL_TTL_SECONDS` (default 3600) bounds how long a leaked link works.
+- **The `/files/` route needs the public hostname in `PICTOR_ALLOWED_HOSTS`**, with
+  a port wildcard if the proxy forwards anything but 80/443. A link that is
+  refused returns 403 with no image, so the browser shows "image unavailable";
+  the container log now names the file and the reason, which is where to look
+  first when a chat UI shows a broken picture.
 - The result text ends with the exact `![name](url)` line to paste into a reply,
   because that is how a chat UI ends up displaying it — see
   [Attaching an image in a chat UI](#attaching-an-image-in-a-chat-ui) and the

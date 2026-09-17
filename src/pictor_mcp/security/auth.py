@@ -182,6 +182,11 @@ def _split_origin(value: str) -> tuple[str, str, str | None]:
     return scheme, host, port
 
 
+#: Ports a proxy may append to a Host header without changing which authority
+#: it names: the default for http and for https. A bare pattern admits them.
+_DEFAULT_PORTS = frozenset({"80", "443"})
+
+
 def _host_matches(host: str, patterns: tuple[str, ...]) -> bool:
     """Match a Host header against an allow-list.
 
@@ -189,6 +194,10 @@ def _host_matches(host: str, patterns: tuple[str, ...]) -> bool:
     port on a host, ``*.example.com`` for a subdomain (on any port, or on a
     named one as ``*.example.com:8077``), and ``*`` to accept any value. A
     missing Host header is always a rejection.
+
+    A bare ``host`` also matches ``host:80`` and ``host:443``: those name the
+    same authority, and a reverse proxy is entitled to forward the port it
+    received. Only a pattern that names a port is that exact about it.
 
     The value is sanitised first. A legitimate Host header never contains ``@``
     (that is URL userinfo, not part of the authority) or a control character,
@@ -231,6 +240,15 @@ def _host_matches(host: str, patterns: tuple[str, ...]) -> bool:
                 return True
             continue
         if value == raw:
+            return True
+        if pattern_port is None and name == pattern_name and port in _DEFAULT_PORTS:
+            # A reverse proxy legitimately forwards the port it received, and
+            # that includes the scheme's default: `Host: example.com:443` names
+            # the same authority as `example.com`. An operator who writes a bare
+            # host means that host, not "that host only when the proxy happens to
+            # drop the port" - and the failure it caused was invisible, because
+            # the tool call that produced the link went over the internal network
+            # while the browser's request for the image did not.
             return True
     return False
 

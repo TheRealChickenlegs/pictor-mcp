@@ -293,6 +293,33 @@ class TestTheHostPolicyHasASingleEnforcementPoint:
             assert status == 403, f"{host}: {status} {body[:200]!r}"
             assert b"host header" in body.lower()
 
+    @pytest.mark.parametrize(
+        ("host", "patterns", "expected"),
+        [
+            # A bare pattern names a host, and a proxy may forward the scheme's
+            # default port with it. Those are the same authority.
+            ("pictor.example.com:443", ("pictor.example.com",), True),
+            ("pictor.example.com:80", ("pictor.example.com",), True),
+            ("pictor.example.com", ("pictor.example.com",), True),
+            # Any other port is a different authority and needs `host:*`.
+            ("pictor.example.com:8077", ("pictor.example.com",), False),
+            ("pictor.example.com:8443", ("pictor.example.com",), False),
+            # A pattern that names a port stays exact about it.
+            ("pictor.example.com:8443", ("pictor.example.com:8443",), True),
+            ("pictor.example.com", ("pictor.example.com:8443",), False),
+            ("pictor.example.com:443", ("pictor.example.com:8443",), False),
+            # The hostname still has to be the one the pattern names.
+            ("pictor.example.com.evil.com:443", ("pictor.example.com",), False),
+            ("evil.com:443", ("pictor.example.com",), False),
+        ],
+    )
+    def test_a_bare_pattern_admits_the_default_ports(
+        self, host: str, patterns: tuple[str, ...], expected: bool
+    ) -> None:
+        from pictor_mcp.security.auth import _host_matches
+
+        assert _host_matches(host, patterns) is expected
+
     def test_a_wildcard_bind_with_no_list_is_loud_and_actually_works(self, sandbox: Sandbox, caplog) -> None:
         """`PICTOR_HOST=0.0.0.0` alone derives `*`, which is a lot to do quietly.
 
@@ -431,6 +458,62 @@ class TestSignedOutputUrls:
         output = await _produce_output(secure_server)
         status, _, _ = secure_server.request(f"/files/{output['path']}")
         assert status == 403
+
+    def test_a_proxy_that_forwards_the_default_port_still_gets_the_image(self, sandbox: Sandbox) -> None:
+        """The failure that looks exactly like a broken image.
+
+        A reverse proxy may pass on the port it received, so the Host header is
+        `pictor.example.com:443` rather than the bare name. An operator who wrote
+        `PICTOR_ALLOWED_HOSTS=pictor.example.com` meant that host, and refusing
+        the default-port form silently broke every generated link - the tool call
+        succeeded over the internal network while the browser's request for the
+        image was rejected. `:443` and `:80` name the same authority as the bare
+        host, so a bare pattern admits them.
+        """
+        config = load_config(
+            base_env(
+                sandbox,
+                PICTOR_TRANSPORT="streamable-http",
+                PICTOR_HOST="127.0.0.1",
+                PICTOR_PORT=str(_free_port()),
+                PICTOR_AUTH_TOKEN=TOKEN,
+                PICTOR_SERVE_OUTPUTS="true",
+                PICTOR_URL_SECRET=SECRET,
+                PICTOR_PUBLIC_BASE_URL="https://pictor.example.com",
+                PICTOR_ALLOWED_HOSTS="127.0.0.1:*,pictor.example.com",
+            )
+        )
+        with _LiveServer(config) as live:
+            import anyio
+
+            output = anyio.run(_produce_output, live)
+            # The link is built from PICTOR_PUBLIC_BASE_URL, not from the
+            # loopback address this test talks to, so keep only its path.
+            from urllib.parse import urlsplit
+
+            parts = urlsplit(output["url"])
+            path = f"{parts.path}?{parts.query}"
+            for host in ("pictor.example.com", "pictor.example.com:443", "pictor.example.com:80"):
+                status, body, headers = live.request(path, headers={"Host": host})
+                assert status == 200, f"{host}: {status} {body[:120]!r}"
+                assert headers.get("content-type", "").startswith("image/")
+            # A port that is not a default still needs `host:*`: it names a
+            # different authority, and admitting it silently would be a hole.
+            status, _, _ = live.request(path, headers={"Host": "pictor.example.com:8077"})
+            assert status == 403
+
+    async def test_a_refused_link_says_why_in_the_log(self, secure_server: _LiveServer, caplog) -> None:
+        """A browser shows only "image unavailable", so the reason has to reach
+        the log or the operator has nothing to go on."""
+        import logging
+
+        output = await _produce_output(secure_server)
+        with caplog.at_level(logging.WARNING, logger="pictor_mcp.server"):
+            status, _, _ = secure_server.request(f"/files/{output['path']}?e=99999999999&s=deadbeef")
+        assert status == 403
+        assert any("signature does not verify" in record.getMessage() for record in caplog.records), [
+            record.getMessage() for record in caplog.records
+        ]
 
 
 class TestUnsignedServerRefusesOutputServing:

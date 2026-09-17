@@ -222,6 +222,16 @@ def _files_endpoint(ctx: ToolContext):
             expires = request.query_params.get("e", "")
             signature = request.query_params.get("s", "")
             if not verify_signed_path(secret, relative, expires, signature):
+                # Previously silent, which made this the least diagnosable
+                # failure in the server: the browser shows only "image
+                # unavailable", and the tool call that produced the link had
+                # already succeeded. The reason belongs in the log.
+                logger.warning(
+                    "refused /files/%s: the link is expired, or its signature does not verify. "
+                    "A proxy that drops or rewrites the query string causes this, as does a "
+                    "request made after PICTOR_URL_TTL_SECONDS has passed.",
+                    relative,
+                )
                 return JSONResponse(
                     {"error": "invalid or expired link"},
                     status_code=403,
