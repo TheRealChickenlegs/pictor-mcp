@@ -19,6 +19,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
+from urllib.parse import urlsplit
 
 from .errors import ConfigError
 
@@ -302,7 +303,39 @@ def inert_allow_list_entries(config: Config) -> list[str]:
             "PICTOR_PUBLIC_BASE_URL is set but PICTOR_SERVE_OUTPUTS=false, so results carry no link and "
             "a chat UI has nothing to render; set PICTOR_SERVE_OUTPUTS=true or drop the base URL"
         )
+    if config.http.serve_outputs and config.http.dns_rebinding_protection and config.http.public_base_url:
+        public_host = urlsplit(config.http.public_base_url).hostname
+        if public_host and not _host_list_permits(public_host, config.http.allowed_hosts):
+            messages.append(
+                f"PICTOR_PUBLIC_BASE_URL names {public_host!r}, which PICTOR_ALLOWED_HOSTS does not admit; "
+                "if your reverse proxy forwards that Host header unchanged - the usual arrangement - the "
+                "browser's request for a generated file link is refused by this server"
+            )
     return messages
+
+
+def _host_list_permits(host: str, patterns: tuple[str, ...]) -> bool:
+    """Whether an HTTP Host allow-list would admit ``host``.
+
+    Uses the guard's own matcher rather than a second copy of its semantics, so
+    a pattern this server accepts cannot be reported as broken. It is
+    deliberately forgiving in one direction: a pattern naming a port
+    (``pictor.example.com:8077``) still admits the port-less Host header a proxy
+    sends for the public URL. This only ever feeds a warning, and a false alarm
+    would train the reader to ignore the real ones.
+    """
+    if not patterns:
+        return False
+
+    from .security.auth import _host_matches
+
+    if _host_matches(host, patterns):
+        return True
+    for pattern in patterns:
+        base, separator, _port = pattern.lower().rpartition(":")
+        if separator and base.strip("[]") == host:
+            return True
+    return False
 
 
 def _names_a_port(entry: str) -> bool:

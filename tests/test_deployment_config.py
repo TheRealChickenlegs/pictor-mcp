@@ -645,6 +645,40 @@ class TestInertAllowListEntries:
             PICTOR_PUBLIC_BASE_URL="https://pictor.example.com",
             PICTOR_SERVE_OUTPUTS="true",
             PICTOR_AUTH_TOKEN="a-sufficiently-long-token-value",
+            PICTOR_ALLOWED_HOSTS="127.0.0.1:*,pictor.example.com",
+        )
+        assert inert_allow_list_entries(config) == []
+
+    def test_a_public_url_the_host_guard_would_refuse_is_reported(self) -> None:
+        """The browser's request for a generated link arrives with the public
+        Host header, so a base URL outside the allow-list produces links this
+        server itself refuses - a failure that looks like a broken image."""
+        config = _config(
+            PICTOR_PUBLIC_BASE_URL="https://pictor.example.com",
+            PICTOR_SERVE_OUTPUTS="true",
+            PICTOR_AUTH_TOKEN="a-sufficiently-long-token-value",
+            PICTOR_ALLOWED_HOSTS="127.0.0.1:*,pictor-mcp:*",
+        )
+        messages = inert_allow_list_entries(config)
+        assert any("pictor.example.com" in message for message in messages), messages
+
+    @pytest.mark.parametrize(
+        "allowed",
+        [
+            "pictor.example.com",
+            "pictor.example.com:8077",
+            "*.example.com",
+            "*",
+        ],
+    )
+    def test_a_permitted_public_url_is_not_reported(self, allowed: str) -> None:
+        """No false alarms: the guard's own matcher decides, so a pattern it
+        accepts cannot be reported as broken."""
+        config = _config(
+            PICTOR_PUBLIC_BASE_URL="https://pictor.example.com",
+            PICTOR_SERVE_OUTPUTS="true",
+            PICTOR_AUTH_TOKEN="a-sufficiently-long-token-value",
+            PICTOR_ALLOWED_HOSTS=allowed,
         )
         assert inert_allow_list_entries(config) == []
 

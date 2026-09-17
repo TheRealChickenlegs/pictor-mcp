@@ -297,31 +297,64 @@ browser-origin configuration is needed.
 2. Set the auth header to `Authorization: Bearer <your token>`.
 3. Make the tools available to a model, then ask it to resize an image.
 
-Three Open WebUI specifics worth knowing:
+Open WebUI specifics, all of them learned the hard way:
 
-- **Images are displayed through markdown, not through the tool result.** Open
-  WebUI renders markdown from the assistant's reply; it does not display the
-  image content block an MCP tool returns ([open-webui discussion
-  #14732](https://github.com/open-webui/open-webui/discussions/14732)). So two
-  things have to be true: [`PICTOR_SERVE_OUTPUTS=true`](#generated-file-urls) so
-  every result carries a signed URL, and a model that repeats the
-  `![name](url)` line the tool result ends with. That line is written into the
-  text on purpose — a URL on its own gets summarised away and the picture never
-  appears. If your model still drops it, say so in its system prompt:
+**Images display through markdown in the text block, and nothing else works.**
+Reading Open WebUI's `process_tool_result` (and its MCP client) explains why:
 
-  > When a pictor-mcp tool returns an image, include its `![name](url)` line in
-  > your reply exactly as given, on its own line.
+- Text blocks are joined. **Exactly one** text block becomes the tool result —
+  two would be wrapped in a JSON object and `json.dumps`-ed, and the markdown
+  inside would render as escaped characters. This server always returns one.
+- The `image` content block is **dropped**. Open WebUI builds its data URI from
+  `item["mimeType"]`, but its own `model_dump()` renames the field to
+  `mime_type` first, so it reads `data:None;base64,…` and gives up. That is
+  Open WebUI's bug and no MCP server using the official SDK models can work
+  around it, which is why [`PICTOR_INLINE_IMAGES=false`](#configuration) is the
+  right setting here — the payload is discarded anyway.
+- `resource_link` blocks are ignored.
 
-  Setting `PICTOR_PUBLIC_BASE_URL` without `PICTOR_SERVE_OUTPUTS` is the usual
-  reason nothing renders, and the server now says so at startup and in `--check`.
-- **The image is served by this server, so the browser has to reach it.** The
-  signed URL is built from `PICTOR_PUBLIC_BASE_URL`, and `/files/` carries its
-  own HMAC credential rather than the API token, so it works in an `<img>` tag
-  with no extra wiring — provided that hostname routes here and is in
-  `PICTOR_ALLOWED_HOSTS`.
-- **If tool discovery fails**, try `PICTOR_STATELESS_HTTP=true` (the default) and
-  `PICTOR_JSON_RESPONSE=true`. Some Open WebUI versions handle plain JSON
-  responses better than SSE streams.
+So the display comes from the model repeating the `![name](url)` line this
+server puts at the end of the result text, and the URL has to be
+[browser-reachable](#generated-file-urls). Three settings, in order:
+
+```bash
+PICTOR_SERVE_OUTPUTS=true        # without this a result carries no URL at all
+PICTOR_PUBLIC_BASE_URL=https://pictor.example.com
+PICTOR_INLINE_IMAGES=false       # saves the discarded base64 payload
+```
+
+If the model summarises without the link, say so in its system prompt:
+
+> When a pictor-mcp tool returns an image, include its `![name](url)` line in
+> your reply exactly as given, on its own line.
+
+**When no image appears, find which link is broken before changing anything.**
+Each command isolates one hop:
+
+```bash
+# 1. Does the server think links are on? configurationWarnings should be empty.
+docker compose exec pictor-mcp python -m pictor_mcp --check
+
+# 2. Does the public hostname reach this container from outside? 200 means yes.
+curl -sS -o /dev/null -w '%{http_code}\n' https://pictor.example.com/healthz
+
+# 3. Did the last tool call actually contain a URL? Look at the tool result in
+#    the chat: no "Image URL:" line means PICTOR_SERVE_OUTPUTS is still false.
+```
+
+A 502/404 from step 2 is the common cause: the proxy serves `/mcp` but not
+`/files/`, or the hostname is not routed to this container at all. The `/files/`
+route is exempt from bearer auth — the HMAC signature in the URL *is* the
+credential — but it is still subject to the `Host` check, so the public hostname
+must be in `PICTOR_ALLOWED_HOSTS`. The server warns when it is not.
+
+One more thing about links: they expire (`PICTOR_URL_TTL_SECONDS`, default one
+hour), so a chat reopened tomorrow shows a broken image. Raise it if you want old
+conversations to keep rendering.
+
+**If tool discovery fails**, try `PICTOR_STATELESS_HTTP=true` (the default) and
+`PICTOR_JSON_RESPONSE=true`. Some Open WebUI versions handle plain JSON
+responses better than SSE streams.
 
 ### Any other stdio client
 
@@ -753,8 +786,9 @@ The most consequential ones:
 | `PICTOR_OUTPUT_ROOT` | `/data/output` | The only writable directory. Must not overlap an input root. |
 | `PICTOR_AUTH_TOKEN` | _(empty)_ | Required for HTTP once reachable off-host. Minimum 16 characters. |
 | `PICTOR_ALLOW_NET_FETCH` | `false` | Enables URL inputs, with the SSRF guard. |
-| `PICTOR_SERVE_OUTPUTS` | `false` | Signed URLs for generated files. |
-| `PICTOR_PUBLIC_BASE_URL` | _(empty)_ | External base URL for generated links. |
+| `PICTOR_SERVE_OUTPUTS` | `false` | Signed URLs for generated files. Set `true` for a chat UI to display results. |
+| `PICTOR_PUBLIC_BASE_URL` | _(empty)_ | External base URL for generated links. Its host must be in `PICTOR_ALLOWED_HOSTS`. |
+| `PICTOR_INLINE_IMAGES` | `true` | Inline image in results. `false` for Open WebUI, which discards it. |
 | `PICTOR_STATELESS_HTTP` | `true` | Best client compatibility. |
 | `PICTOR_MAX_PIXELS` | `64000000` | Per-frame decompression-bomb ceiling. |
 | `PICTOR_MAX_ANIMATION_PIXELS` | `128000000` | Ceiling on width × height × frames. |

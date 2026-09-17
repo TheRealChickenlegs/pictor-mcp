@@ -97,6 +97,80 @@ class TestChatUiDisplay:
         assert re.search(r"[?&]s=[0-9a-f]{16,}", url), url
 
 
+class TestOpenWebUiContentShape:
+    """What Open WebUI does with the content blocks we return.
+
+    Its `process_tool_result` walks the MCP content list and:
+
+    * keeps ``type: "text"`` items, then sets the tool result to that string
+      **only if there is exactly one** - two text blocks become a list, which is
+      then ``json.dumps``-ed into a blob in which the markdown is escaped and
+      renders as nothing but characters;
+    * tries ``get_file_url_from_base64`` for ``type: "image"`` using
+      ``item["mimeType"]``, which its own ``model_dump()`` has already renamed to
+      ``mime_type``, so the data URI becomes ``data:None;base64,...`` and the
+      image is dropped. No MCP server using the official SDK models can avoid
+      that, which is why the markdown URL is the only path that displays;
+    * ignores anything else, including our ``resource_link`` entries.
+    """
+
+    def _content(self, sandbox: Sandbox, **overrides: str):
+        result = _result(url="https://pictor.example.com/files/resized/photo-w1200.webp")
+        return (
+            _builder(sandbox, **overrides)
+            .build_model_result(result, inline_bytes=b"\x89PNG fake", inline_mime="image/webp")
+            .content
+        )
+
+    def test_exactly_one_text_block(self, sandbox: Sandbox) -> None:
+        """Two would be JSON-ified by Open WebUI and the markdown would stop
+        rendering - a silent failure with no error anywhere."""
+        blocks = [block.model_dump(mode="json") for block in self._content(sandbox)]
+        assert len([block for block in blocks if block["type"] == "text"]) == 1, blocks
+
+    def test_the_text_block_carries_the_markdown(self, sandbox: Sandbox) -> None:
+        blocks = [block.model_dump(mode="json") for block in self._content(sandbox)]
+        text = next(block["text"] for block in blocks if block["type"] == "text")
+        assert re.search(r"!\[[^\]]+\]\(https://pictor\.example\.com/files/[^)]+\)", text), text
+
+    def test_the_image_block_uses_the_spec_field_name_on_the_wire(self, sandbox: Sandbox) -> None:
+        """`mimeType`, not `mime_type`: that is the MCP field name, and the SDK
+        model aliases it. Pinned because renaming it to `mime_type` to match
+        Open WebUI's bug would break every other client."""
+        blocks = [block.model_dump(mode="json", by_alias=True) for block in self._content(sandbox)]
+        image = next(block for block in blocks if block["type"] == "image")
+        assert image["mimeType"] == "image/webp", image
+        assert "mime_type" not in image, image
+
+    @pytest.mark.parametrize(("inline_images", "expected"), [("true", True), ("false", False)])
+    def test_an_inline_image_can_be_switched_off(self, sandbox: Sandbox, inline_images: str, expected: bool) -> None:
+        """Open WebUI discards the block, so sending it only costs context and
+        bandwidth. This exercises the real build path, where the setting is read,
+        rather than `build_model_result`, which is handed bytes explicitly."""
+        from pictor_mcp.models import FileOutput
+        from pictor_mcp.outputs import StoredOutput
+
+        output = StoredOutput(
+            file=FileOutput(
+                name="photo-w1200.webp",
+                path="resized/photo-w1200.webp",
+                mime_type="image/webp",
+                format="webp",
+                byte_size=142_300,
+                width=1200,
+                height=900,
+                sha256="a" * 64,
+                url="https://pictor.example.com/files/resized/photo-w1200.webp?e=1&s=2",
+            ),
+            data=b"\x89PNG fake",
+            absolute_path=sandbox.outputs("resized/photo-w1200.webp"),
+        )
+        builder = _builder(sandbox, PICTOR_INLINE_IMAGES=inline_images)
+        result = builder.build_image_result(operation="image_resize", outputs=[output], inline=True)
+        kinds = [block.model_dump(mode="json")["type"] for block in result.content]
+        assert ("image" in kinds) is expected, kinds
+
+
 class TestServingIsRequired:
     @pytest.mark.parametrize("key", ["PICTOR_PUBLIC_BASE_URL"])
     def test_a_base_url_alone_changes_nothing_in_the_text(self, sandbox: Sandbox, key: str) -> None:
