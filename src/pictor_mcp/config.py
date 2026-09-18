@@ -214,8 +214,12 @@ class Config:
     #: Only use the GPU above this pixel count (transfer overhead dominates
     #: for small images).
     gpu_min_pixels: int = 4_000_000
-    #: Embed the resulting image inline in tool results by default.
-    inline_images: bool = True
+    #: Embed the resulting image inline in tool results. Off by default: a
+    #: base64 payload is large, it is repeated on every call, and the clients
+    #: this server targets either render the markdown URL or discard the block
+    #: outright. Set ``PICTOR_INLINE_IMAGES=true`` for a vision client that
+    #: cannot fetch a URL.
+    inline_images: bool = False
     log_level: str = "INFO"
     #: Background-removal model name passed to rembg.
     bg_model: str = "u2net"
@@ -468,7 +472,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         strip_metadata=e.bool("PICTOR_STRIP_METADATA", True),
         gpu=gpu,
         gpu_min_pixels=e.int("PICTOR_GPU_MIN_PIXELS", 4_000_000, minimum=0),
-        inline_images=e.bool("PICTOR_INLINE_IMAGES", True),
+        inline_images=e.bool("PICTOR_INLINE_IMAGES", False),
         log_level=log_level,
         bg_model=e.raw("PICTOR_BG_MODEL", "u2net") or "u2net",
         font_dirs=tuple(e.paths("PICTOR_FONT_DIRS") or [Path("/usr/share/fonts")]),

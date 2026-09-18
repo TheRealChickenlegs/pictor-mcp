@@ -69,7 +69,13 @@ _QualityArg = Annotated[
 ]
 _ReturnImageArg = Annotated[
     bool,
-    Field(description="Embed the resulting image inline so vision-capable clients can see it."),
+    Field(
+        description=(
+            "Embed the resulting image inline so vision-capable clients can see it. "
+            "Only has an effect when the server allows inlining (PICTOR_INLINE_IMAGES=true); "
+            "it is off by default because the base64 payload is large."
+        )
+    ),
 ]
 _ReturnBase64Arg = Annotated[
     bool,
@@ -175,7 +181,7 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
                 "supported": ["2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26"],
                 "negotiation": "automatic: modern stateless requests and legacy initialize-handshake clients are both served",
                 "structuredContent": True,
-                "inlineImages": True,
+                "inlineImages": ctx.config.inline_images,
                 "resourceLinks": True,
             },
             formats=public_format_catalogue(),
@@ -185,7 +191,8 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
             backends=ctx.registry.to_public_dict(),
             gpu=gpu_device_info(),
             notes=[
-                "Image is written to the output root and also returned inline when requested.",
+                "Image is written to the output root and returned as a URL in the result text.",
+                "Inline image bytes are off unless PICTOR_INLINE_IMAGES=true; prefer the markdown URL.",
                 "Use image_transform to chain several steps in one call.",
                 "Call image_list_inputs to discover readable files when a path is not known.",
             ],

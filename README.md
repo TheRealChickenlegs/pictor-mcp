@@ -58,7 +58,9 @@ amplification and truncated files are rejected before pixel data is allocated.
 **It returns what every client can use.** Each result carries a self-contained
 text summary, machine-readable `structuredContent`, an optional inline image for
 vision models, and a resource link — so the same call works in a terminal, a
-chat UI, or an agent loop.
+chat UI, or an agent loop. The inline image is **off by default**: base64 is
+large and it would be repeated on every call, while the markdown URL in the text
+is what a chat UI actually renders.
 
 **It speaks every MCP revision.** The MCP Python SDK negotiates per connection:
 modern stateless `2026-07-28` requests and legacy `initialize`-handshake clients
@@ -218,7 +220,8 @@ Add to your DSH plugin configuration. DSH exposes the tools as
 ```
 
 DSH renders the inline `image` content blocks, so a vision model can see the
-result directly. Raise `toolCallTimeoutMs` above the default 60 s if you process
+result directly — set `PICTOR_INLINE_IMAGES=true` for that, since inlining is
+off by default. Raise `toolCallTimeoutMs` above the default 60 s if you process
 very large images.
 
 ### OpenCode
@@ -309,24 +312,24 @@ Reading Open WebUI's `process_tool_result` (and its MCP client) explains why:
   `item["mimeType"]`, but its own `model_dump()` renames the field to
   `mime_type` first, so it reads `data:None;base64,…` and gives up. That is
   Open WebUI's bug and no MCP server using the official SDK models can work
-  around it, which is why [`PICTOR_INLINE_IMAGES=false`](#configuration) is the
-  right setting here — the payload is discarded anyway.
+  around it — which is why inlining defaults to off; the payload would be
+  discarded anyway.
 - `resource_link` blocks are ignored.
 
 So the display comes from the model repeating the `![image](url)` line this
 server puts at the end of the result text, and the URL has to be
-[browser-reachable](#generated-file-urls). Three settings, in order:
+[browser-reachable](#generated-file-urls). Two settings, in order:
 
 ```bash
 PICTOR_SERVE_OUTPUTS=true        # without this a result carries no URL at all
 PICTOR_PUBLIC_BASE_URL=https://pictor.example.com
-PICTOR_INLINE_IMAGES=false       # saves the discarded base64 payload
 ```
 
 If the model summarises without the link, say so in its system prompt:
 
-> When a pictor-mcp tool returns an image, include its `![image](url)` line in
-> your reply exactly as given, on its own line.
+> When a pictor-mcp tool returns an image, emit its `![image](url)` line as live
+> Markdown on its own line in your reply, exactly as given — never inside a code
+> block or backticks.
 
 **When no image appears, find which link is broken before changing anything.**
 Each command isolates one hop:
@@ -523,7 +526,8 @@ understands:
 // 1. text — always present, self-contained
 "Image resize completed.\nInput: 4000x3000 JPEG 3.1 MB\nOutput: 1200x900 WEBP 142.3 KB -> resized/photo-w1200.webp\nSize: 3.1 MB -> 142.3 KB (95.4% smaller)",
 
-// 2. image — inline, for vision models (when return_image is true and it fits)
+// 2. image — inline, for vision models (only when PICTOR_INLINE_IMAGES=true,
+//    return_image is true and it fits under the inline byte limit)
 {"type": "image", "data": "<base64>", "mimeType": "image/webp"},
 
 // 3. resource_link — for clients that resolve MCP resources
@@ -543,6 +547,8 @@ understands:
 ```
 
 Base64 never appears twice: if the image is inlined, it is not also in the JSON.
+Neither happens by default — block 2 is absent unless `PICTOR_INLINE_IMAGES=true`
+and the caller asks (`return_image: true`), and `return_base64` is `false`.
 
 **Errors are readable and machine-actionable.** A refused path returns
 `is_error: true`, a plain message (`path is outside the configured input roots`),
@@ -833,7 +839,7 @@ The most consequential ones:
 | `PICTOR_ALLOW_NET_FETCH` | `false` | Enables URL inputs, with the SSRF guard. |
 | `PICTOR_SERVE_OUTPUTS` | `false` | Signed URLs for generated files. Set `true` for a chat UI to display results. |
 | `PICTOR_PUBLIC_BASE_URL` | _(empty)_ | External base URL for generated links. Its host must be in `PICTOR_ALLOWED_HOSTS`. |
-| `PICTOR_INLINE_IMAGES` | `true` | Inline image in results. `false` for Open WebUI, which discards it. |
+| `PICTOR_INLINE_IMAGES` | `false` | Inline base64 image in results. Off by default: large, and repeated on every call. `true` only for a vision client that cannot fetch a URL; Open WebUI discards the block either way. |
 | `PICTOR_STATELESS_HTTP` | `true` | Best client compatibility. |
 | `PICTOR_MAX_PIXELS` | `64000000` | Per-frame decompression-bomb ceiling. |
 | `PICTOR_MAX_ANIMATION_PIXELS` | `128000000` | Ceiling on width × height × frames. |

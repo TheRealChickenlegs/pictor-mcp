@@ -23,11 +23,16 @@ pytestmark = pytest.mark.anyio
 
 @pytest.fixture
 async def session(server_env):
-    """A live client session against a freshly spawned server process."""
+    """A live client session against a freshly spawned server process.
+
+    Inlining is switched on here: it is off by default (the base64 blob is
+    large and repeated on every call), so a test that wants to inspect the
+    image block has to ask for it the way an operator would.
+    """
     params = StdioServerParameters(
         command=sys.executable,
         args=["-m", "pictor_mcp"],
-        env=server_env,
+        env={**server_env, "PICTOR_INLINE_IMAGES": "true"},
     )
     async with stdio_client(params) as (read, write), ClientSession(read, write) as client:
         await client.initialize()
@@ -96,6 +101,26 @@ class TestProtocolSurface:
 
 
 class TestResultEnvelope:
+    async def test_no_base64_unless_the_server_opts_in(self, server_env: dict[str, str]) -> None:
+        """The default result carries no image bytes.
+
+        They are large, they are repeated on every call, and the clients this
+        server targets either render the markdown URL or throw the block away -
+        so a default that inlines them is a context cost with no reader. Note
+        that the caller asks for it here (`return_image: true`) and still does
+        not get it: the server setting is the gate.
+        """
+        env = {key: value for key, value in server_env.items() if key != "PICTOR_INLINE_IMAGES"}
+        params = StdioServerParameters(command=sys.executable, args=["-m", "pictor_mcp"], env=env)
+        async with stdio_client(params) as (read, write), ClientSession(read, write) as client:
+            await client.initialize()
+            result = await client.call_tool(
+                "image_resize",
+                {"path": "photo.jpg", "width": 80, "return_image": True},
+            )
+        assert all(block.type != "image" for block in result.content), result.content
+        assert _structured(result)["inlineImageIncluded"] is False
+
     async def test_result_carries_text_image_and_link(self, session: ClientSession) -> None:
         result = await session.call_tool(
             "image_resize",
