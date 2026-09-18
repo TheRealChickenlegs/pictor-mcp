@@ -24,6 +24,13 @@ from .conftest import Sandbox, base_env
 
 TOKEN = "a-sufficiently-long-token-value"
 
+#: The exact line the server asks a model to repeat, copied here so a reworded
+#: instruction cannot pass by being merely present.
+INSTRUCTION = (
+    "To display the result, emit the following line as live Markdown on its own line "
+    "\u2014 do not put it in a code block or backticks:"
+)
+
 
 def _builder(sandbox: Sandbox, **overrides: str) -> ResultBuilder:
     config = load_config(base_env(sandbox, PICTOR_AUTH_TOKEN=TOKEN, **overrides))
@@ -62,7 +69,11 @@ class TestChatUiDisplay:
         ).summarise(_result(url="https://pictor.example.com/files/resized/photo-w1200.webp"))
 
         assert text.rstrip().endswith("![image](https://pictor.example.com/files/resized/photo-w1200.webp?e=1&s=2)")
-        assert "copy this into your reply exactly as written" in text
+        assert INSTRUCTION in text
+        # The wording has to name the failure it prevents: a model that fences
+        # the line emits something that renders as the syntax, not the picture.
+        assert "live Markdown" in text
+        assert "code block" in text
 
     def test_every_output_gets_its_own_line(self, sandbox: Sandbox) -> None:
         """A width ladder is several images; the model must not be given one and
@@ -79,7 +90,7 @@ class TestChatUiDisplay:
         link would be worse than saying nothing."""
         text = _builder(sandbox).summarise(_result(url=None))
         assert "![" not in text
-        assert "copy this into your reply" not in text
+        assert INSTRUCTION not in text
 
     def test_the_url_is_built_from_the_public_base(self, sandbox: Sandbox) -> None:
         builder = _builder(sandbox, PICTOR_SERVE_OUTPUTS="true", PICTOR_PUBLIC_BASE_URL="https://pictor.example.com")

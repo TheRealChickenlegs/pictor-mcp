@@ -293,10 +293,18 @@ class ResultBuilder:
         # `![image](url)` that clients and models reproduce verbatim, and a name
         # with dots, dashes or spaces is one more thing to retype slightly
         # differently - which is the whole failure mode being worked around.
+        #
+        # The wording spells out "live Markdown, not a code block" because a
+        # model that fences or backticks the line produces text that renders as
+        # the syntax rather than as the picture - the same empty result, with no
+        # error to explain it.
         linked = [output for output in result.outputs if output.url]
         if linked:
             lines.append("")
-            lines.append("To display the result, copy this into your reply exactly as written:")
+            lines.append(
+                "To display the result, emit the following line as live Markdown on its own line "
+                "\u2014 do not put it in a code block or backticks:"
+            )
             lines.extend(f"![image]({output.url})" for output in linked)
 
         return "\n".join(lines)
