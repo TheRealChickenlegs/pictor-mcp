@@ -288,11 +288,16 @@ class ResultBuilder:
         # therefore disappears: the model summarises the run and the picture
         # never appears. Spelling out the exact line to send is what makes it
         # show up, and putting it last is what makes a model repeat it.
+        #
+        # The alt text is the literal word `image`, not the file name: it is
+        # `![image](url)` that clients and models reproduce verbatim, and a name
+        # with dots, dashes or spaces is one more thing to retype slightly
+        # differently - which is the whole failure mode being worked around.
         linked = [output for output in result.outputs if output.url]
         if linked:
             lines.append("")
             lines.append("To display the result, copy this into your reply exactly as written:")
-            lines.extend(f"![{output.name}]({output.url})" for output in linked)
+            lines.extend(f"![image]({output.url})" for output in linked)
 
         return "\n".join(lines)
 

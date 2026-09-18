@@ -355,6 +355,7 @@ class TestSecurityHeaders:
             ("x-content-type-options", "nosniff"),
             ("x-frame-options", "DENY"),
             ("referrer-policy", "no-referrer"),
+            ("cross-origin-resource-policy", "same-origin"),
         ],
     )
     def test_headers_are_present(self, secure_server: _LiveServer, header: str, expected: str) -> None:
@@ -408,6 +409,21 @@ class TestSignedOutputUrls:
         # Content type must be right or a browser will not render it.
         assert headers.get("content-type", "").startswith("image/")
         assert headers.get("content-disposition") == "inline"
+
+    async def test_a_served_image_may_be_embedded_by_another_origin(self, secure_server: _LiveServer) -> None:
+        """The header that made a perfect URL render nothing.
+
+        `Cross-Origin-Resource-Policy: same-origin` is right for the API and
+        fatal for a signed file: the browser discards the response when a page on
+        another origin puts it in an `<img>`, which is the only thing the URL is
+        for. A top-level navigation ignores CORP, so the link opened in a new tab
+        while the picture stayed blank - the exact symptom this pins.
+        """
+        output = await _produce_output(secure_server)
+        path = output["url"].split(secure_server.base, 1)[1]
+        status, _, headers = secure_server.request(path)
+        assert status == 200
+        assert headers.get("cross-origin-resource-policy") == "cross-origin"
 
     async def test_a_forged_signature_is_refused(self, secure_server: _LiveServer) -> None:
         output = await _produce_output(secure_server)

@@ -313,7 +313,7 @@ Reading Open WebUI's `process_tool_result` (and its MCP client) explains why:
   right setting here — the payload is discarded anyway.
 - `resource_link` blocks are ignored.
 
-So the display comes from the model repeating the `![name](url)` line this
+So the display comes from the model repeating the `![image](url)` line this
 server puts at the end of the result text, and the URL has to be
 [browser-reachable](#generated-file-urls). Three settings, in order:
 
@@ -325,7 +325,7 @@ PICTOR_INLINE_IMAGES=false       # saves the discarded base64 payload
 
 If the model summarises without the link, say so in its system prompt:
 
-> When a pictor-mcp tool returns an image, include its `![name](url)` line in
+> When a pictor-mcp tool returns an image, include its `![image](url)` line in
 > your reply exactly as given, on its own line.
 
 **When no image appears, find which link is broken before changing anything.**
@@ -347,6 +347,17 @@ A 502/404 from step 2 is the common cause: the proxy serves `/mcp` but not
 route is exempt from bearer auth — the HMAC signature in the URL *is* the
 credential — but it is still subject to the `Host` check, so the public hostname
 must be in `PICTOR_ALLOWED_HOSTS`. The server warns when it is not.
+
+A link that **opens perfectly in a new tab and still shows nothing in the chat**
+is a different failure, and it is a response header rather than a URL. Served
+files carry `Cross-Origin-Resource-Policy: cross-origin` so another origin (Open
+WebUI's) may embed them. Builds before that set `same-origin` on every response,
+and a browser obeys it for an `<img>` while ignoring it for a top-level
+navigation — so the URL checks out by hand and the picture stays blank, with only
+a console error (`net::ERR_BLOCKED_BY_RESPONSE`, or a
+`Cross-Origin-Resource-Policy` line) to show for it. If that is what you see,
+rebuild the image. The API routes still send `same-origin`; only `/files/`
+differs.
 
 One more thing about links: they expire (`PICTOR_URL_TTL_SECONDS`, default one
 hour), so a chat reopened tomorrow shows a broken image. Raise it if you want old
@@ -792,7 +803,7 @@ container log says which of the reasons it was.
   refused returns 403 with no image, so the browser shows "image unavailable";
   the container log now names the file and the reason, which is where to look
   first when a chat UI shows a broken picture.
-- The result text ends with the exact `![name](url)` line to paste into a reply,
+- The result text ends with the exact `![image](url)` line to paste into a reply,
   because that is how a chat UI ends up displaying it — see
   [Attaching an image in a chat UI](#attaching-an-image-in-a-chat-ui) and the
   [Open WebUI notes](#open-webui). Setting `PICTOR_PUBLIC_BASE_URL` while this is

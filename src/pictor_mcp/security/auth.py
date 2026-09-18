@@ -124,8 +124,23 @@ class BearerAuthMiddleware:
         await send({"type": "http.response.body", "body": body})
 
 
+#: Path prefixes whose responses another origin may embed.
+#:
+#: A signed output URL exists to be put in an ``<img>`` tag on a page this
+#: server does not control - Open WebUI's, typically - and
+#: ``Cross-Origin-Resource-Policy: same-origin`` forbids exactly that. The
+#: failure is invisible from here: CORP does not apply to a top-level
+#: navigation, so the same URL opens perfectly in a new tab while the browser
+#: discards the embedded image and logs only a console error.
+_EMBEDDABLE_PATH_PREFIXES = ("/files/",)
+
+
 class SecurityHeadersMiddleware:
-    """Adds conservative security headers to every response."""
+    """Adds conservative security headers to every response.
+
+    With one exception: signed file responses are marked embeddable, because
+    being loaded cross-origin is the entire point of them.
+    """
 
     def __init__(self, app: ASGIApp, *, hsts: bool = False) -> None:
         self.app = app
@@ -136,6 +151,8 @@ class SecurityHeadersMiddleware:
             await self.app(scope, receive, send)
             return
 
+        embeddable = str(scope.get("path", "")).startswith(_EMBEDDABLE_PATH_PREFIXES)
+
         async def send_with_headers(message: dict[str, Any]) -> None:
             if message["type"] == "http.response.start":
                 raw = list(message.get("headers", []))
@@ -144,7 +161,10 @@ class SecurityHeadersMiddleware:
                     (b"x-content-type-options", b"nosniff"),
                     (b"referrer-policy", b"no-referrer"),
                     (b"x-frame-options", b"DENY"),
-                    (b"cross-origin-resource-policy", b"same-origin"),
+                    (
+                        b"cross-origin-resource-policy",
+                        b"cross-origin" if embeddable else b"same-origin",
+                    ),
                 ]
                 if self._hsts:
                     extra.append((b"strict-transport-security", b"max-age=31536000; includeSubDomains"))

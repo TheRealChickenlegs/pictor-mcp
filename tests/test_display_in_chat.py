@@ -61,9 +61,7 @@ class TestChatUiDisplay:
             sandbox, PICTOR_SERVE_OUTPUTS="true", PICTOR_PUBLIC_BASE_URL="https://pictor.example.com"
         ).summarise(_result(url="https://pictor.example.com/files/resized/photo-w1200.webp"))
 
-        assert text.rstrip().endswith(
-            "![photo-w1200.webp](https://pictor.example.com/files/resized/photo-w1200.webp?e=1&s=2)"
-        )
+        assert text.rstrip().endswith("![image](https://pictor.example.com/files/resized/photo-w1200.webp?e=1&s=2)")
         assert "copy this into your reply exactly as written" in text
 
     def test_every_output_gets_its_own_line(self, sandbox: Sandbox) -> None:
@@ -74,6 +72,7 @@ class TestChatUiDisplay:
         ).summarise(_result(url="https://pictor.example.com/files/resized/x.webp", outputs=3))
         markdown = re.findall(r"!\[[^\]]+\]\([^)]+\)", text)
         assert len(markdown) == 3, markdown
+        assert all(line.startswith("![image](") for line in markdown), markdown
 
     def test_no_markdown_without_a_url(self, sandbox: Sandbox) -> None:
         """Without serving there is nothing to render, and inventing a relative
@@ -148,7 +147,7 @@ class TestOpenWebUiContentShape:
     def test_the_text_block_carries_the_markdown(self, sandbox: Sandbox) -> None:
         blocks = [block.model_dump(mode="json") for block in self._content(sandbox)]
         text = next(block["text"] for block in blocks if block["type"] == "text")
-        assert re.search(r"!\[[^\]]+\]\(https://pictor\.example\.com/files/[^)]+\)", text), text
+        assert re.search(r"!\[image\]\(https://pictor\.example\.com/files/[^)]+\)", text), text
 
     def test_the_image_block_uses_the_spec_field_name_on_the_wire(self, sandbox: Sandbox) -> None:
         """`mimeType`, not `mime_type`: that is the MCP field name, and the SDK
