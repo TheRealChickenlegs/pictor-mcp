@@ -148,9 +148,12 @@ inputs, which is a property no input filter can be trusted to prevent:
 
 Neither is memory exhaustion that a pixel ceiling would stop, and a SIGSEGV
 cannot be caught from Python. Bounding the input is not a sound alternative
-either: the failing depth depends on the stack the renderer runs with, which is
-smaller in a worker thread and smaller again under musl, so a limit tuned on one
-machine is not a limit on another.
+either: the threshold is a property of the stack the renderer runs with, not of
+the document. The 300-element file above renders without complaint on glibc
+x86_64, which is where CI runs, so the same file that kills one host is routine
+on another - and the stack is smaller again in a worker thread, and smaller
+still under musl. A limit tuned on one machine is therefore not a limit on
+another, which is why the mitigation is isolation rather than a bigger cap.
 
 Rasterisation therefore runs in a separate short-lived process (`python -B -m
 pictor_mcp.imaging._svgrender`), and the child is treated as expendable. Its

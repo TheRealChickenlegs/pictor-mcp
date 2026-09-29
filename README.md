@@ -488,10 +488,12 @@ before you point it at untrusted files:
 - **It renders in a separate process.** The renderer is a native library, and it
   overflows its stack and aborts on some small, shallow documents — a chain of
   300 sibling `<pattern>` elements, about 20 KB at XML depth 5, segfaults
-  `resvg` 0.5.0 deterministically. A segfault cannot be caught from Python, so
-  in-process rendering would mean one crafted file kills the server for every
-  client. The child is expendable; a document that crashes it becomes an
-  ordinary failed tool call.
+  `resvg` 0.5.0 deterministically on macOS arm64, while the very same file
+  renders on glibc x86_64. A segfault cannot be caught from Python, and the
+  breaking point follows the stack rather than the document, so in-process
+  rendering would mean one crafted file kills the server for every client. The
+  child is expendable; a document that crashes it becomes an ordinary failed
+  tool call.
 - **The document does not choose its own size.** `width`/`height` is read, then
   `viewBox`, then `PICTOR_SVG_DEFAULT_SIZE`; the result is clamped to
   `PICTOR_MAX_DIMENSION` and `PICTOR_MAX_PIXELS` *before* the renderer starts. A

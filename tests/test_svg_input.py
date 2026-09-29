@@ -323,47 +323,109 @@ class TestRasterisation:
             loaded.close()
 
 
+#: A program that kills its own process with SIGSEGV - the way an overflowing
+#: renderer dies - so the crash-handling path can be tested on any host, whatever
+#: that host's stack size happens to be. Core dumps are disabled first (where the
+#: platform has ``resource``) so a failing run cannot litter the working directory.
+_CRASHING_CHILD = (
+    "import os, signal\n"
+    "try:\n"
+    "    import resource\n"
+    "\n"
+    "    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))\n"
+    "except ImportError:\n"
+    "    pass\n"
+    "os.kill(os.getpid(), signal.SIGSEGV)\n"
+)
+
+
 @pytest.mark.skipif(not renderer_available(), reason="resvg-py is not installed")
 class TestHostileInputCannotTakeTheServerDown:
     """The regression tests for the crash that forced the subprocess design.
 
-    Each of these drives the full loader path - the same code a tool call reaches -
-    so if the isolation is ever removed, the failure is a segfault in the test
-    runner rather than a clean assertion. That is the point: the tests are written
-    so the regression cannot be missed.
+    The renderer's breaking point is a property of the stack it runs on, not of the
+    document, so it does not reproduce the same way everywhere: the 300-element
+    ``<pattern>`` chain below overflows the stack on macOS arm64 and renders happily
+    on glibc x86_64, which is where CI runs. A test that insists on the crash is
+    therefore asserting a platform - and, worse, it leaves this file's most
+    important property, that a dying child is survivable, covered by nothing at all
+    on the very platform the suite runs on in CI.
+
+    So the crash path is pinned by injecting a child that kills itself with SIGSEGV,
+    which is deterministic everywhere, and the real document is exercised separately
+    for whatever the host happens to do with it.
     """
 
-    async def test_a_shallow_document_that_crashes_the_renderer(self, loader: ImageLoader) -> None:
-        with pytest.raises(PictorError) as excinfo:
-            await loader.load(_inline(pattern_chain(300)))
-        # Either outcome is acceptable; a crash of the *server* is not. The child
-        # dying is reported as an ordinary refusal naming no library internals.
-        assert excinfo.value.code in {"unsupported_format", "limit_exceeded"}
+    @staticmethod
+    def _suicidal_child(policy: SvgPolicy, width: int, height: int) -> list[str]:
+        """A child that dies on SIGSEGV, the way an overflowing renderer does.
+
+        Core dumps are disabled first, so a failing run cannot litter the working
+        directory with a core file.
+        """
+        del policy, width, height
+        return [sys.executable, "-c", _CRASHING_CHILD]
+
+    async def test_a_child_killed_by_a_signal_becomes_a_refused_call(
+        self, loader: ImageLoader, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Exit-by-signal is precisely the case that cannot be caught in-process."""
+        monkeypatch.setattr(vector, "_child_command", self._suicidal_child)
+        with pytest.raises(UnsupportedFormatError) as excinfo:
+            await loader.load(_inline(svg_document('<rect width="16" height="16"/>')))
+
+        assert "could not be rasterised" in excinfo.value.message
+        assert excinfo.value.details["detected_format"] == "svg"
+        # Whatever the child said on its way out stays in the server log.
         assert "resvg" not in excinfo.value.message
+
+    async def test_a_child_that_dies_does_not_poison_the_loader(
+        self, loader: ImageLoader, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The real assertion: the next request must still work."""
+        with monkeypatch.context() as patched:
+            patched.setattr(vector, "_child_command", self._suicidal_child)
+            with pytest.raises(UnsupportedFormatError):
+                await loader.load(_inline(svg_document('<rect width="16" height="16"/>')))
+
+        loaded = await loader.load(_inline(svg_document('<rect width="16" height="16" fill="#00ff00"/>')))
+        try:
+            assert (loaded.geometry.width, loaded.geometry.height) == (16, 16)
+            assert loaded.image.convert("RGBA").getpixel((8, 8))[:3] == (0, 255, 0)
+        finally:
+            loaded.close()
 
     async def test_deep_nesting_is_refused_before_the_renderer_sees_it(self, loader: ImageLoader) -> None:
         """The depth ceiling exists so this input never reaches the renderer at all."""
         with pytest.raises(LimitExceededError):
             await loader.load(_inline(deep_document(1_000)))
 
-    async def test_the_loader_still_works_after_a_crashing_render(self, loader: ImageLoader) -> None:
-        """The real assertion: a hostile file must not poison the process."""
-        with pytest.raises(PictorError):
-            await loader.load(_inline(pattern_chain(300)))
+    @pytest.mark.parametrize("count", [25, 200, 300])
+    async def test_a_real_document_at_the_renderers_breaking_point(self, loader: ImageLoader, count: int) -> None:
+        """Chain lengths below, at and past the point where the stack gives out.
 
-        loaded = await loader.load(_inline(svg_document('<rect width="16" height="16" fill="#00ff00"/>')))
+        300 crashes on macOS arm64 and renders on glibc x86_64, so the outcome is
+        whatever the host does - both branches are exercised here, because 25 and 200
+        render on either platform. What is not acceptable is the server dying, or the
+        caller being told about it in a library's words.
+        """
         try:
-            assert (loaded.geometry.width, loaded.geometry.height) == (16, 16)
-        finally:
-            loaded.close()
+            loaded = await loader.load(_inline(pattern_chain(count)))
+        except PictorError as exc:
+            assert exc.code in {"unsupported_format", "limit_exceeded"}
+            assert "resvg" not in exc.message
+        else:
+            try:
+                assert loaded.geometry.pixels == 16 * 16
+            finally:
+                loaded.close()
 
-    @pytest.mark.parametrize("count", [25, 200])
-    async def test_below_the_crash_threshold_still_renders(self, loader: ImageLoader, count: int) -> None:
-        loaded = await loader.load(_inline(pattern_chain(count)))
+        # Whichever way the host went, the loader is still usable afterwards.
+        reopened = await loader.load(_inline(svg_document('<rect width="16" height="16"/>')))
         try:
-            assert (loaded.geometry.width, loaded.geometry.height) == (16, 16)
+            assert reopened.geometry.pixels == 16 * 16
         finally:
-            loaded.close()
+            reopened.close()
 
     async def test_an_external_file_reference_is_not_read(self, loader: ImageLoader) -> None:
         """If the reference were followed, the pixels would carry the file's data."""
