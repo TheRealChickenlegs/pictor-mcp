@@ -188,6 +188,11 @@ class TestEveryToolRuns:
         [
             ("image_capabilities", {}),
             ("image_info", {"path": "photo.jpg"}),
+            # SVG is rasterised in a separate child process, so the full tool path
+            # for a vector input is worth one call: a renderer the spawned server
+            # cannot reach would otherwise only surface in production.
+            ("image_info", {"path": "logo.svg"}),
+            ("image_convert", {"path": "logo.svg", "target_format": "png"}),
             ("image_convert", {"path": "photo.jpg", "target_format": "png"}),
             ("image_resize", {"path": "photo.jpg", "width": 64}),
             ("image_compress", {"path": "photo.jpg", "quality": 50}),
@@ -237,6 +242,9 @@ class TestErrorsReachTheClient:
             ("image_info", {"path": "broken.jpg"}, "header could not be parsed"),
             ("image_convert", {"path": "photo.jpg", "target_format": "pdf"}, "cannot write"),
             ("image_convert", {"path": "photo.jpg", "target_format": "heic"}, "cannot write"),
+            # SVG is readable but never written: an image server that emits SVG is a
+            # stored-XSS primitive.
+            ("image_convert", {"path": "logo.svg", "target_format": "svg"}, "cannot write"),
             ("image_resize", {"path": "photo.jpg"}, "width, height or percent"),
             ("image_crop", {"path": "photo.jpg"}, "box, aspect_ratio or trim"),
             ("image_watermark", {"path": "photo.jpg"}, "exactly one of"),

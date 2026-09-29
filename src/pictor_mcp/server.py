@@ -43,6 +43,7 @@ from .config import Config, inert_allow_list_entries, load_config
 from .errors import ConfigError, PictorError
 from .imaging.fonts import FontIndex
 from .imaging.loader import ImageLoader
+from .imaging.vector import renderer_available, renderer_label
 from .outputs import ResultBuilder
 from .resources import register_resources, serve_mime
 from .security.auth import (
@@ -446,6 +447,18 @@ def _redacted_summary(config: Config, ctx: ToolContext) -> dict[str, Any]:
         "networkFetch": {
             "enabled": config.fetch.enabled,
             "allowedHosts": list(config.fetch.allowed_hosts) or "any public host",
+        },
+        # SVG is rendered out of process, so an operator debugging a refused vector
+        # file needs to see both the switch and whether the renderer is even present.
+        "svg": {
+            "enabled": config.svg.enabled,
+            "renderer": renderer_label(),
+            "rendererAvailable": renderer_available(),
+            "maxDepth": config.svg.max_depth,
+            "defaultSize": config.svg.default_size,
+            "timeoutSeconds": config.svg.timeout_seconds,
+            "systemFonts": config.svg.system_fonts,
+            "memoryLimitMib": config.svg.memory_limit_mib,
         },
         "gpu": config.gpu,
         "acceleration": ctx.registry.active,

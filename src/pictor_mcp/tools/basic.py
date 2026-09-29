@@ -141,6 +141,7 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
         from ..imaging.background import ml_available
         from ..imaging.formats import public_format_catalogue
         from ..imaging.pipeline import describe_operations
+        from ..imaging.vector import renderer_available, renderer_label
         from ..outputs import build_result
 
         ml_ok, ml_detail = ml_available()
@@ -159,6 +160,20 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
             "outputUrlsEnabled": ctx.config.http.serve_outputs,
             "dnsRebindingProtection": ctx.config.http.dns_rebinding_protection,
             "backgroundRemovalMl": {"available": ml_ok, "detail": ml_detail},
+            # SVG is the one input rendered outside this process, so the isolation
+            # boundary is reported rather than left implicit: a caller that cares
+            # whether a vector file is accepted needs to know the renderer exists.
+            "svg": {
+                "enabled": ctx.config.svg.enabled,
+                "renderer": renderer_label(),
+                "rendererAvailable": renderer_available(),
+                "isolation": "rendered in a separate short-lived process, never in the server itself",
+                "externalReferences": "file:, http: and https: references are never resolved",
+                "systemFonts": ctx.config.svg.system_fonts,
+                "maxDepth": ctx.config.svg.max_depth,
+                "defaultSize": ctx.config.svg.default_size,
+                "timeoutSeconds": ctx.config.svg.timeout_seconds,
+            },
         }
         limits = {
             "maxFileBytes": ctx.config.limits.max_file_bytes,
@@ -184,7 +199,7 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
                 "inlineImages": ctx.config.inline_images,
                 "resourceLinks": True,
             },
-            formats=public_format_catalogue(),
+            formats=public_format_catalogue(svg_enabled=ctx.config.svg.enabled),
             operations=describe_operations(),
             limits=limits,
             security=security,
@@ -286,7 +301,8 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
         title="Convert image format",
         description=(
             "Convert an image between formats (JPEG, PNG, WebP, AVIF, TIFF, GIF, BMP, ICO, "
-            "JPEG 2000, QOI, PPM), controlling quality, losslessness and metadata."
+            "JPEG 2000, QOI, PPM), controlling quality, losslessness and metadata. SVG input is "
+            "accepted and rasterised, but SVG is never a target format."
         ),
     )
     @tool_guard

@@ -33,6 +33,7 @@ The server is then at `http://127.0.0.1:8077/mcp`.
   - [Any other stdio client](#any-other-stdio-client)
 - [Tools](#tools)
   - [Image inputs](#image-inputs)
+    - [SVG input](#svg-input)
     - [Attaching an image in a chat UI](#attaching-an-image-in-a-chat-ui)
 - [How results come back](#how-results-come-back)
 - [GPU acceleration](#gpu-acceleration)
@@ -414,7 +415,7 @@ deployment, so an agent can check rather than guess.
 
 | Tool | Purpose |
 |---|---|
-| `image_convert` | Between JPEG, PNG, WebP, AVIF, TIFF, GIF, BMP, ICO, JPEG 2000, QOI, PPM. |
+| `image_convert` | Between JPEG, PNG, WebP, AVIF, TIFF, GIF, BMP, ICO, JPEG 2000, QOI, PPM. Also rasterises SVG input. |
 | `image_resize` | By width, height, percentage, or into a box. Six fit modes, six filters. |
 | `image_compress` | By quality, or search for the best quality under a target size. |
 | `image_crop` | Pixel box, aspect ratio with gravity, or auto-trim a border. |
@@ -473,6 +474,38 @@ this server sits *inside* the network those addresses name — an image that onl
 exists on that network (a chat UI's own file endpoint, a NAS, another container)
 has to be mounted under `PICTOR_INPUT_ROOTS` and passed as `path`. URLs needing
 credentials are refused too, since the fetch carries none.
+
+#### SVG input
+
+SVG is accepted and rasterised, so `image_convert(path="logo.svg",
+target_format="png")` works. It is read-only: SVG is never an output format, and
+it is never served inline, because an SVG document can carry script.
+
+Pillow has no SVG decoder, so this is the one input that does not go through the
+shared decode path. Three things follow from that, and they are worth knowing
+before you point it at untrusted files:
+
+- **It renders in a separate process.** The renderer is a native library, and it
+  overflows its stack and aborts on some small, shallow documents — a chain of
+  300 sibling `<pattern>` elements, about 20 KB at XML depth 5, segfaults
+  `resvg` 0.5.0 deterministically. A segfault cannot be caught from Python, so
+  in-process rendering would mean one crafted file kills the server for every
+  client. The child is expendable; a document that crashes it becomes an
+  ordinary failed tool call.
+- **The document does not choose its own size.** `width`/`height` is read, then
+  `viewBox`, then `PICTOR_SVG_DEFAULT_SIZE`; the result is clamped to
+  `PICTOR_MAX_DIMENSION` and `PICTOR_MAX_PIXELS` *before* the renderer starts. A
+  file claiming `1000000x1000000` is downscaled, not obeyed.
+- **It reaches nothing.** `file:`, `http:` and `https:` references are never
+  resolved, `DOCTYPE` is ignored, and no entity is expanded against the network
+  or the disk. `PICTOR_SVG_SYSTEM_FONTS=false` goes further and lets the renderer
+  open no files at all, at the cost of `<text>` fidelity.
+
+Set `PICTOR_ALLOW_SVG=false` to refuse SVG outright; the error then names the
+setting instead of the generic "not a recognisable image". Nesting deeper than
+`PICTOR_SVG_MAX_DEPTH` is refused before the renderer is involved, and a render
+that exceeds `PICTOR_SVG_TIMEOUT_SECONDS` is killed. Real files exported from
+Illustrator and Inkscape — `DOCTYPE` and all — render normally.
 
 #### Attaching an image in a chat UI
 
@@ -680,6 +713,7 @@ Read [SECURITY.md](SECURITY.md) for the full threat model. The short version:
 | Arbitrary file write | All writes confined to `PICTOR_OUTPUT_ROOT`, written atomically with `O_NOFOLLOW`. |
 | TOCTOU / symlink swap | Files are opened with `O_NOFOLLOW` and re-verified through `/proc/self/fd` after opening. |
 | Decompression bombs | Pixel, per-axis, frame and file-size ceilings enforced **before** allocation. |
+| Crashing SVG renderer | SVG rasterisation runs in a separate process, so a document that overflows the renderer's stack (a 20 KB `<pattern>` chain does it reliably) fails one tool call instead of killing the server. Its declared size is clamped to the pixel ceilings before it starts, nesting beyond `PICTOR_SVG_MAX_DEPTH` is refused, and `file:`/`http:` references and XML entities are never resolved. |
 | SSRF via URL input | Off by default. When on: scheme/port/host allow-lists, all resolved addresses must be globally routable, connection pinned to the validated IP, per-hop redirect validation, streaming size cap. |
 | DNS rebinding | Host and Origin headers validated on **every** route, including health and file serving. |
 | Unauthenticated access | Optional bearer token, compared in constant time. Fail-closed configuration: serving files without a credential refuses to start. |
@@ -837,6 +871,7 @@ The most consequential ones:
 | `PICTOR_OUTPUT_ROOT` | `/data/output` | The only writable directory. Must not overlap an input root. |
 | `PICTOR_AUTH_TOKEN` | _(empty)_ | Required for HTTP once reachable off-host. Minimum 16 characters. |
 | `PICTOR_ALLOW_NET_FETCH` | `false` | Enables URL inputs, with the SSRF guard. |
+| `PICTOR_ALLOW_SVG` | `true` | Rasterise SVG input in an isolated child process. Set `false` to refuse SVG entirely. |
 | `PICTOR_SERVE_OUTPUTS` | `false` | Signed URLs for generated files. Set `true` for a chat UI to display results. |
 | `PICTOR_PUBLIC_BASE_URL` | _(empty)_ | External base URL for generated links. Its host must be in `PICTOR_ALLOWED_HOSTS`. |
 | `PICTOR_INLINE_IMAGES` | `false` | Inline base64 image in results. Off by default: large, and repeated on every call. `true` only for a vision client that cannot fetch a URL; Open WebUI discards the block either way. |

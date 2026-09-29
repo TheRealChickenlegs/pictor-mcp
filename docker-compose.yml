@@ -228,6 +228,27 @@ x-pictor-environment: &pictor-environment
   PICTOR_MAX_INPUT_BASE64_BYTES: ${PICTOR_MAX_INPUT_BASE64_BYTES:-50331648}
   PICTOR_MAX_INLINE_IMAGE_BYTES: ${PICTOR_MAX_INLINE_IMAGE_BYTES:-1048576}
 
+  # --- SVG (vector) input --------------------------------------------------
+  # SVG is rasterised by a native library in a separate short-lived process: the
+  # renderer overflows its stack and aborts on some small, shallow documents - a
+  # 20 KB chain of 300 sibling <pattern> elements segfaults resvg 0.5.0
+  # deterministically - and a segfault cannot be caught from Python. The child is
+  # expendable; this server is not. The renderer resolves no file:, http: or
+  # https: reference, and the declared size is clamped to PICTOR_MAX_DIMENSION and
+  # PICTOR_MAX_PIXELS before it is started.
+  PICTOR_ALLOW_SVG: ${PICTOR_ALLOW_SVG:-true}
+  # Canvas for a document that declares no width/height and no viewBox.
+  PICTOR_SVG_DEFAULT_SIZE: ${PICTOR_SVG_DEFAULT_SIZE:-1024}
+  # Nesting ceiling. The renderer segfaults around 1000 levels, so stay below it.
+  PICTOR_SVG_MAX_DEPTH: ${PICTOR_SVG_MAX_DEPTH:-256}
+  # Wall-clock budget for one render, in seconds. The child is killed on expiry.
+  PICTOR_SVG_TIMEOUT_SECONDS: ${PICTOR_SVG_TIMEOUT_SECONDS:-20}
+  # System fonts make <text> render as glyphs; false means the renderer opens no
+  # files at all, at the cost of text fidelity.
+  PICTOR_SVG_SYSTEM_FONTS: ${PICTOR_SVG_SYSTEM_FONTS:-true}
+  # Address-space ceiling applied inside the child, in MiB.
+  PICTOR_SVG_MEMORY_LIMIT_MIB: ${PICTOR_SVG_MEMORY_LIMIT_MIB:-2048}
+
   # --- output behaviour ----------------------------------------------------
   # Strip EXIF, GPS and ICC from outputs. Leave true unless a downstream step
   # genuinely needs the metadata: it is both a privacy and a size win.

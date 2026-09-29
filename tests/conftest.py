@@ -96,6 +96,27 @@ def sandbox(tmp_path: Path) -> Sandbox:
     # Not an image at all.
     (input_dir / "notimage.txt").write_bytes(b"this is not an image")
 
+    # A vector source. SVG is rasterised by an isolated child process rather than
+    # decoded by Pillow, so it reaches a different code path entirely; see
+    # tests/test_svg_input.py. The Illustrator-style DOCTYPE with its unused
+    # namespace entities is deliberate: that shape is what real exporters emit, and
+    # a hardening step that rejected entity declarations would refuse those files.
+    (input_dir / "logo.svg").write_text(
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        "<!-- Generator: Adobe Illustrator 27.0.0, SVG Export Plug-In -->\n"
+        '<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" '
+        '"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd" [\n'
+        '\t<!ENTITY ns_extend "http://ns.adobe.com/Extensibility/1.0/">\n'
+        '\t<!ENTITY ns_ai "http://ns.adobe.com/AdobeIllustrator/10.0/">\n'
+        "]>\n"
+        '<svg version="1.1" xmlns="http://www.w3.org/2000/svg" width="120px" height="60px" '
+        'viewBox="0 0 120 60">\n'
+        '<rect width="120" height="60" fill="#3366cc"/>\n'
+        '<circle cx="30" cy="30" r="20" fill="#ffcc00"/>\n'
+        "</svg>\n",
+        encoding="utf-8",
+    )
+
     nested = input_dir / "nested"
     nested.mkdir()
     _photo(80, 80).save(nested / "deep.png")

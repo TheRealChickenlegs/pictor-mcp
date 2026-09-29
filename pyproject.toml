@@ -22,6 +22,12 @@ dependencies = [
     "pillow>=10.4",
     "numpy>=1.26",
     "pydantic>=2.7,<3",
+    # SVG rasterisation. Self-contained abi3 wheels exist for macOS, glibc and musl
+    # on every architecture this project ships, so it adds no system libraries -
+    # unlike CairoSVG, which needs libcairo installed. The renderer is a native
+    # library that can abort the process on hostile input, so it is only ever run in
+    # a child process: see imaging/_svgrender.py.
+    "resvg-py>=0.5",
 ]
 
 [project.optional-dependencies]

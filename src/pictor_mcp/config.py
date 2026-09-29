@@ -159,6 +159,43 @@ class FetchPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class SvgPolicy:
+    """SVG (vector) input handling.
+
+    SVG is the only accepted input that is rasterised rather than decoded, and the
+    only one rendered by a native library that is *known* to abort the process on
+    hostile input (see :mod:`pictor_mcp.imaging._svgrender`). Every setting here
+    either bounds that work or turns the feature off:
+
+    ``enabled``
+        Turn the whole path off. Off means SVG is refused with a message naming the
+        switch, which is still far more useful than the "not a recognisable image"
+        that an unregistered vector format otherwise produces.
+    ``default_size``
+        Canvas for a document that declares neither a size nor a ``viewBox``.
+    ``max_depth``
+        Nesting ceiling. Deep nesting is never legitimate and is one of the inputs
+        that overflows the renderer's stack, so it is rejected before the renderer
+        is started rather than being handed over to crash on.
+    ``timeout_seconds``
+        Wall-clock budget for one render. The child is killed when it expires.
+    ``system_fonts``
+        Let the renderer read the system font directories, which is what makes
+        ``<text>`` render as glyphs. Off means a renderer that touches no files at
+        all, at the cost of text fidelity.
+    ``memory_limit_mib``
+        Address-space ceiling applied inside the child, where the OS supports it.
+    """
+
+    enabled: bool = True
+    default_size: int = 1024
+    max_depth: int = 256
+    timeout_seconds: float = 20.0
+    system_fonts: bool = True
+    memory_limit_mib: int = 2048
+
+
+@dataclass(frozen=True, slots=True)
 class HttpPolicy:
     """HTTP transport hardening."""
 
@@ -203,6 +240,7 @@ class Config:
     limits: Limits
     fetch: FetchPolicy
     http: HttpPolicy
+    svg: SvgPolicy
     #: Directories that may be read from.
     input_roots: tuple[Path, ...]
     #: The single directory that may be written to.
@@ -314,6 +352,18 @@ def inert_allow_list_entries(config: Config) -> list[str]:
                 f"PICTOR_PUBLIC_BASE_URL names {public_host!r}, which PICTOR_ALLOWED_HOSTS does not admit; "
                 "if your reverse proxy forwards that Host header unchanged - the usual arrangement - the "
                 "browser's request for a generated file link is refused by this server"
+            )
+    # An enabled feature whose dependency is missing is the same class of surprise
+    # as an allow-list entry that can never match: SVG files would be refused for a
+    # reason the operator never chose. Imported here rather than at module scope
+    # because imaging.vector imports this module.
+    if config.svg.enabled:
+        from .imaging.vector import renderer_available
+
+        if not renderer_available():
+            messages.append(
+                "PICTOR_ALLOW_SVG is enabled but the 'resvg-py' renderer is not installed, so SVG files "
+                "will be refused; install pictor-mcp with its dependencies or set PICTOR_ALLOW_SVG=false"
             )
     return messages
 
@@ -462,11 +512,27 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
     if log_level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
         raise ConfigError(f"PICTOR_LOG_LEVEL invalid (got {log_level!r})")
 
+    svg = SvgPolicy(
+        # Defaults to on: the renderer is a dependency of this package, so the
+        # feature being present but silently inert would be the bigger surprise.
+        # `inert_allow_list_entries` warns when it is enabled without a renderer.
+        enabled=e.bool("PICTOR_ALLOW_SVG", True),
+        default_size=e.int("PICTOR_SVG_DEFAULT_SIZE", 1024, minimum=16, maximum=16384),
+        # Well below the ~1000 levels that overflow the renderer's stack, and far
+        # above anything a real drawing tool emits (hand-authored files rarely
+        # exceed 30).
+        max_depth=e.int("PICTOR_SVG_MAX_DEPTH", 256, minimum=8, maximum=4096),
+        timeout_seconds=e.float("PICTOR_SVG_TIMEOUT_SECONDS", 20.0, minimum=1.0, maximum=600.0),
+        system_fonts=e.bool("PICTOR_SVG_SYSTEM_FONTS", True),
+        memory_limit_mib=e.int("PICTOR_SVG_MEMORY_LIMIT_MIB", 2048, minimum=64, maximum=65536),
+    )
+
     return Config(
         transport=transport,
         limits=limits,
         fetch=fetch,
         http=http,
+        svg=svg,
         input_roots=tuple(input_roots),
         output_root=output_root,
         strip_metadata=e.bool("PICTOR_STRIP_METADATA", True),
@@ -488,6 +554,7 @@ __all__ = [
     "FetchPolicy",
     "HttpPolicy",
     "Limits",
+    "SvgPolicy",
     "is_loopback_bind",
     "load_config",
 ]

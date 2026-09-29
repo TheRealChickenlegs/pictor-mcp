@@ -609,6 +609,21 @@ class TestInertAllowListEntries:
         assert len(messages) == 2, messages
         assert all("PICTOR_ALLOWED_ORIGINS" in message for message in messages)
 
+    def test_an_svg_switch_without_a_renderer_is_reported(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An enabled feature whose dependency is missing is the same surprise as a
+        dead allow-list entry: SVG files would be refused for a reason nobody chose."""
+        from pictor_mcp.imaging import vector
+
+        monkeypatch.setattr(vector, "renderer_available", lambda: False)
+        messages = inert_allow_list_entries(_config())
+        assert any("PICTOR_ALLOW_SVG" in message for message in messages), messages
+
+    def test_the_svg_warning_disappears_when_the_switch_is_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from pictor_mcp.imaging import vector
+
+        monkeypatch.setattr(vector, "renderer_available", lambda: False)
+        assert inert_allow_list_entries(_config(PICTOR_ALLOW_SVG="false")) == []
+
     def test_a_wildcard_origin_is_not_reported(self) -> None:
         """`*.example.com` and `*` are meaningful without a scheme: they are
         matched against the host part of the Origin."""

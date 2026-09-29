@@ -27,6 +27,7 @@ from typing import Final
 from PIL import Image
 
 from ..errors import UnsupportedFormatError
+from . import vector
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,9 +202,22 @@ _SPECS: Final[tuple[FormatSpec, ...]] = (
 #: Canonical formats that may be written.
 OUTPUT_FORMATS: Final[dict[str, FormatSpec]] = {spec.key: spec for spec in _SPECS}
 
-#: Formats that may be decoded. Superset of outputs: PSD and MPO are readable
-#: but not writable, and both are mainstream enough to accept.
+#: Formats that may be decoded. A superset of the outputs: SVG is readable because
+#: the isolated renderer produces a raster for it, and PSD and MPO are readable
+#: because both are mainstream enough to accept. None of the three is writable.
 _INPUT_ONLY: Final[dict[str, FormatSpec]] = {
+    "svg": FormatSpec(
+        key="svg",
+        pillow_format=vector.PILLOW_FORMAT,
+        mime="image/svg+xml",
+        extension=".svg",
+        label="SVG (vector)",
+        supports_alpha=True,
+        notes=(
+            "Read-only. Rasterised by an isolated renderer process; never written and never served "
+            "inline, because an SVG can carry script."
+        ),
+    ),
     "psd": FormatSpec(
         key="psd",
         pillow_format="PSD",
@@ -269,6 +283,19 @@ def _codec_available(pillow_format: str) -> bool:
     return pillow_format.upper() in Image.OPEN or pillow_format.upper() in Image.SAVE
 
 
+def _input_codec_available(spec: FormatSpec) -> bool:
+    """Whether this environment can actually decode ``spec``.
+
+    SVG is the exception that needs its own probe: Pillow reports no SVG codec at
+    all, because rasterising it is the isolated renderer's job, so the usual
+    ``Image.OPEN``/``Image.SAVE`` test would report a hard "no" for a format that is
+    in fact perfectly readable here.
+    """
+    if spec.key == "svg":
+        return vector.renderer_available()
+    return _codec_available(spec.pillow_format)
+
+
 def resolve_input_format(name: str) -> FormatSpec:
     """Resolve a caller-supplied format name to an accepted *input* codec."""
     spec = _lookup(name, INPUT_FORMATS)
@@ -276,6 +303,11 @@ def resolve_input_format(name: str) -> FormatSpec:
         raise UnsupportedFormatError(
             f"unsupported image format {name!r}",
             supported=sorted(INPUT_FORMATS),
+        )
+    if not _input_codec_available(spec):
+        raise UnsupportedFormatError(
+            f"this environment has no {spec.label} renderer",
+            format=spec.key,
         )
     return spec
 
@@ -338,12 +370,17 @@ def assert_decoded_format_allowed(pillow_format: str | None, *, source: str = "i
     return spec
 
 
-def public_format_catalogue() -> dict[str, list[dict[str, object]]]:
-    """Format lists for the capabilities tool, filtered by real build support."""
+def public_format_catalogue(*, svg_enabled: bool = True) -> dict[str, list[dict[str, object]]]:
+    """Format lists for the capabilities tool, filtered by real build support.
+
+    ``svg_enabled`` carries the operator's :class:`~pictor_mcp.config.SvgPolicy`
+    decision, so a format the server has been told to refuse is not advertised as
+    readable. Output formats are unaffected either way: SVG is never written.
+    """
     readable = [
         spec.to_public_dict()
         for spec in sorted(INPUT_FORMATS.values(), key=lambda s: s.key)
-        if _codec_available(spec.pillow_format)
+        if _input_codec_available(spec) and (spec.key != "svg" or svg_enabled)
     ]
     writable = [
         spec.to_public_dict()

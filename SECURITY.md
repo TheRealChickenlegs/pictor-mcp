@@ -90,6 +90,7 @@ rejected before any pixel buffer is allocated.
 | `PICTOR_MAX_FRAMES` | 120 | Animation amplification; the frame table is walked with the ceiling enforced as it goes. |
 | `PICTOR_MAX_ANIMATION_PIXELS` | 128 MP | The *product* of frames and pixels. Per-frame and frame-count limits do not bound it, and every frame is held as a full bitmap before re-encoding. |
 | `PICTOR_OP_TIMEOUT_SECONDS` | 120 | Cooperative wall-clock budget, checked between pipeline steps and between quality-search probes. A single Pillow call cannot be interrupted from Python, so this bounds *sequences* of work, not one call. |
+| `PICTOR_SVG_TIMEOUT_SECONDS` | 20 | One SVG render. This one *is* a hard kill, because the renderer runs as a child process rather than a Pillow call. |
 
 Intermediate allocations are bounded too, not just final ones. `cover` and
 `outside` fit modes scale until the target box is covered, so a `24000x1`
@@ -119,17 +120,66 @@ corruption.
 Pillow can open roughly forty formats. This server accepts an explicit subset.
 
 **Refused for input and output:** PDF, PostScript/EPS, WMF, HDF5, GRIB, FITS,
-and the rest of the scientific/vector containers. They either shell out to an
-external interpreter, are not images, or add a parser with an extensive CVE
-history and no upside here.
+and the rest of the scientific containers. They either shell out to an external
+interpreter, are not images, or add a parser with an extensive CVE history and no
+upside here.
 
 **Refused for output:** PDF and EPS specifically — an image converter that will
-write a PDF is a document-forgery primitive.
+write a PDF is a document-forgery primitive. SVG is in this group too: it is
+readable, but never written and never served inline, because an SVG document can
+carry script.
 
 The format Pillow reports after opening the stream is authoritative. The file
 extension, the caller's hint and the HTTP `Content-Type` are never used to
 choose a decoder, so a file named `photo.png` whose bytes are a PostScript
 program is rejected at the point Pillow identifies it.
+
+#### SVG: the one input rendered instead of decoded
+
+SVG has no Pillow decoder, so it is rasterised, and it is the only input this
+server hands to a native renderer. That renderer **aborts the process** on some
+inputs, which is a property no input filter can be trusted to prevent:
+
+- a chain of 300 sibling `<pattern>` elements — about 20 KiB of XML at depth 5,
+  with no unusual constructs — overflows its stack and raises SIGSEGV on
+  `resvg-py` 0.5.0 (macOS arm64, CPython 3.12), deterministically; 200 render
+  normally;
+- `<g>` nesting around 1000 levels does the same.
+
+Neither is memory exhaustion that a pixel ceiling would stop, and a SIGSEGV
+cannot be caught from Python. Bounding the input is not a sound alternative
+either: the failing depth depends on the stack the renderer runs with, which is
+smaller in a worker thread and smaller again under musl, so a limit tuned on one
+machine is not a limit on another.
+
+Rasterisation therefore runs in a separate short-lived process (`python -B -m
+pictor_mcp.imaging._svgrender`), and the child is treated as expendable. Its
+death, by signal or otherwise, is reported as a failed tool call. The costs are
+one interpreter start plus a Rust extension import — about 18 ms per render.
+
+Controls applied around it:
+
+| Control | Where |
+|---|---|
+| Process isolation — a crash kills the child, not the server | `subprocess.run`, one child per render |
+| Render size clamped to `PICTOR_MAX_DIMENSION` / `PICTOR_MAX_PIXELS` **before** the renderer starts | `vector.render_target` |
+| Nesting beyond `PICTOR_SVG_MAX_DEPTH` refused before the renderer starts | `vector.inspect_svg`, an iterative `expat` walk that builds no tree |
+| Wall-clock kill at `PICTOR_SVG_TIMEOUT_SECONDS`, plus `RLIMIT_CPU` and `RLIMIT_AS` inside the child | `vector._run_renderer`, `_svgrender._apply_limits` |
+| `file:`, `http:` and `https:` references never resolved | the child passes no `resources_dir`, and never a path |
+| `DOCTYPE` ignored; no entity resolved against network or disk | `expat` (no external entity resolution) and the renderer alike |
+| Returned bytes must be a PNG within the size bound for the requested pixels | `vector._run_renderer` |
+| Concurrency bounded, so a flood of renders cannot spawn children without limit | the shared `ConcurrencyGate` |
+
+Entity declarations are deliberately *not* rejected. Files exported from
+Illustrator and Inkscape carry a `DOCTYPE` whose internal subset declares unused
+namespace entities, and refusing those would reject a large share of the SVG
+files people actually have. Neither `expat` nor the renderer resolves them
+against the network or the filesystem; `expat`'s own amplification guard refuses
+a billion-laughs document in ~40 ms.
+
+The renderer reads the system font directories so that `<text>` renders as
+glyphs. Set `PICTOR_SVG_SYSTEM_FONTS=false` for a renderer that opens no files
+at all.
 
 ### 4. SSRF (URL inputs)
 
@@ -273,6 +323,15 @@ Being explicit about these is more useful than implying they do not exist.
    survive.
 11. **The `--check` flag prints resolved configuration.** Secrets are redacted,
     but paths and limits are shown. Treat its output as internal.
+12. **SVG input depends on a third-party native renderer.** `resvg-py` is a
+    Rust library reached through a Python wrapper, and it is known to abort on
+    crafted input (see section 3). The subprocess boundary contains that — the
+    server survives and the call fails — but a renderer bug that produced wrong
+    pixels, or an exploitable memory-safety flaw that escaped the child, is not
+    something this server can detect. Keep the dependency patched, and set
+    `PICTOR_ALLOW_SVG=false` if the threat model does not include vector files.
+    Note that the isolation is deliberately one-directional: it protects the
+    server from the renderer, not the renderer from a document.
 
 ---
 ## Deployment checklist

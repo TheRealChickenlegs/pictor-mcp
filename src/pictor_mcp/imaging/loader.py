@@ -37,6 +37,7 @@ from ..errors import InvalidArgumentError, LimitExceededError, UnsupportedFormat
 from ..security.limits import Geometry, check_base64_size, check_decoded_geometry
 from ..security.net import SafeFetcher
 from ..security.paths import PathJail
+from . import vector
 from .formats import FormatSpec, assert_decoded_format_allowed
 
 logger = logging.getLogger(__name__)
@@ -189,22 +190,9 @@ class ImageLoader:
         if not data:
             raise InvalidArgumentError("image data is empty")
 
-        try:
-            # Pillow reads the header lazily; geometry is validated before any
-            # pixel buffer is allocated.
-            image = Image.open(io.BytesIO(data))
-        except UnidentifiedImageError as exc:
-            raise UnsupportedFormatError(
-                "the supplied bytes are not a recognisable image",
-            ) from exc
-        except Image.DecompressionBombError as exc:
-            raise LimitExceededError(
-                "image exceeds the decoder's decompression-bomb threshold",
-            ) from exc
-        except (OSError, ValueError, SyntaxError) as exc:
-            raise UnsupportedFormatError("image header could not be parsed") from exc
+        image, pillow_format, rasterised = self._open(data)
 
-        spec = assert_decoded_format_allowed(image.format, source="input")
+        spec = assert_decoded_format_allowed(pillow_format, source="input")
         self._note_origin(image, origin)
 
         try:
@@ -231,7 +219,7 @@ class ImageLoader:
             image.close()
             raise
 
-        notes: list[str] = []
+        notes: list[str] = list(rasterised)
         if frames > 1 and frame_policy == "first":
             notes.append(f"input has {frames} frames; only the first was used")
 
@@ -246,6 +234,52 @@ class ImageLoader:
             original_format=spec.key,
             notes=notes,
         )
+
+    def _open(self, data: bytes) -> tuple[Image.Image, str | None, list[str]]:
+        """Produce a decoded image, its format name, and any rasterisation notes.
+
+        SVG is tried first because Pillow cannot open it at all: without this branch
+        the caller would only ever see "not a recognisable image" for a vector file,
+        with nothing to say that the format is supported and why it failed.
+
+        The routing is strict in both directions.
+        :func:`~pictor_mcp.imaging.vector.looks_like_svg` is only a bounded prefix
+        hint, so when the document turns out not to be an SVG after all
+        (``NotSvgDocumentError``) the bytes go to Pillow as normal - which is what
+        keeps a JPEG with ``<svg`` in an EXIF comment decoding as a JPEG. And when
+        the hint does not fire at all, an SVG is impossible, so the extra parse is
+        never paid for raster input.
+        """
+        if vector.looks_like_svg(data):
+            try:
+                image, notes = vector.rasterize_svg(
+                    data,
+                    self._config.svg,
+                    max_dimension=self._config.limits.max_dimension,
+                    max_pixels=self._config.limits.max_pixels,
+                )
+            except vector.NotSvgDocumentError:
+                pass
+            else:
+                return image, vector.PILLOW_FORMAT, notes
+
+        try:
+            # Pillow reads the header lazily; geometry is validated before any
+            # pixel buffer is allocated.
+            image = Image.open(io.BytesIO(data))
+        except UnidentifiedImageError as exc:
+            raise UnsupportedFormatError(
+                "the supplied bytes are not a recognisable image",
+            ) from exc
+        except Image.DecompressionBombError as exc:
+            raise LimitExceededError(
+                "image exceeds the decoder's decompression-bomb threshold",
+            ) from exc
+        except (OSError, ValueError, SyntaxError) as exc:
+            raise UnsupportedFormatError("image header could not be parsed") from exc
+        # The format Pillow identified is what the allow-list validates, never the
+        # extension and never the caller's claim.
+        return image, image.format, []
 
     @staticmethod
     def _count_frames(image: Image.Image, max_frames: int, frame_policy: FramePolicy) -> int:
