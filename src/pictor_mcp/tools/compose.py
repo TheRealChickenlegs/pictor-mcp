@@ -51,32 +51,29 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
     @server.tool(
         name="image_transform",
         title="Apply an ordered image pipeline",
-        description=(
-            "Run several operations in one call, in order. Prefer this over chaining single-step "
-            "tools: it transfers the image once and applies every step server-side. "
-            "Operations: auto_orient, resize, crop, rotate, flip, sharpen, blur, smart_crop, "
-            "watermark_text, watermark_image, background_remove, feather."
-        ),
+        description="Apply ordered image operations in one server-side pass; see `operations` for supported steps.",
     )
     @tool_guard(ctx)
     async def image_transform(
-        path: Annotated[str | None, Field(description="Path to the image, inside an allowed input root.")] = None,
-        base64_data: Annotated[str | None, Field(description="Inline base64 image, optionally a data: URI.")] = None,
-        url: Annotated[str | None, Field(description="http(s) URL to fetch (disabled by default).")] = None,
+        path: Annotated[str | None, Field(description="Image path inside an allowed input root.")] = None,
+        base64_data: Annotated[str | None, Field(description="Base64 image data; data URIs are accepted.")] = None,
+        url: Annotated[str | None, Field(description="HTTP(S) image URL; fetching may be disabled.")] = None,
         operations: Annotated[
             list[Operation],
-            Field(min_length=1, max_length=32, description="Ordered list of operations, each with an 'op' field."),
+            Field(min_length=1, max_length=32, description="Ordered operations (1-32)."),
         ] = ...,
         output_format: Annotated[
             str | None,
-            Field(description="Output codec; defaults to the input format."),
+            Field(description="Output format; defaults to the input format."),
         ] = None,
-        quality: Annotated[int | None, Field(ge=1, le=100, description="Lossy quality for the final encode.")] = None,
-        lossless: Annotated[bool, Field(description="Use a lossless encode where supported.")] = False,
-        strip_metadata: Annotated[bool | None, Field(description="Strip EXIF/GPS metadata from the output.")] = None,
-        output_name: Annotated[str | None, Field(description="Override the output filename.")] = None,
-        return_image: Annotated[bool, Field(description="Embed the result inline for vision clients.")] = True,
-        return_base64: Annotated[bool, Field(description="Include base64 in the JSON result.")] = False,
+        quality: Annotated[int | None, Field(ge=1, le=100, description="Lossy output quality (1-100).")] = None,
+        lossless: Annotated[bool, Field(description="Prefer lossless encoding when supported.")] = False,
+        strip_metadata: Annotated[bool | None, Field(description="Strip EXIF/GPS metadata.")] = None,
+        output_name: Annotated[str | None, Field(description="Output filename override.")] = None,
+        return_image: Annotated[
+            bool, Field(description="Include the image inline when server configuration permits.")
+        ] = True,
+        return_base64: Annotated[bool, Field(description="Include encoded image bytes in the result.")] = False,
     ) -> ImageResult:
         with ctx.gate.slot():
             loaded = await ctx.load_input(path=path, base64_data=base64_data, url=url)
@@ -114,51 +111,50 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
     @server.tool(
         name="image_watermark",
         title="Watermark an image",
-        description=(
-            "Add a text or image watermark with position, opacity, rotation and optional tiling. "
-            "Supply either 'text' or 'watermark_path'."
-        ),
+        description="Add a text or image watermark; provide exactly one of `text` or `watermark_path`.",
     )
     @tool_guard(ctx)
     async def image_watermark(
-        path: Annotated[str | None, Field(description="Path to the base image.")] = None,
-        base64_data: Annotated[str | None, Field(description="Inline base64 base image.")] = None,
-        url: Annotated[str | None, Field(description="http(s) URL to fetch.")] = None,
+        path: Annotated[str | None, Field(description="Base image path.")] = None,
+        base64_data: Annotated[str | None, Field(description="Base image as base64.")] = None,
+        url: Annotated[str | None, Field(description="HTTP(S) image URL; fetching may be disabled.")] = None,
         text: Annotated[str | None, Field(max_length=500, description="Watermark text.")] = None,
         watermark_path: Annotated[
             str | None,
-            Field(description="Path to a logo/watermark image (mutually exclusive with text)."),
+            Field(description="Watermark image path; mutually exclusive with `text`."),
         ] = None,
         position: Annotated[
             str,
-            Field(description="center, top, bottom, left, right, or a corner like bottom-right."),
+            Field(description="Position anchor, e.g. bottom-right."),
         ] = "bottom-right",
         opacity: Annotated[float, Field(ge=0, le=1, description="Watermark opacity.")] = 0.6,
         font_size: Annotated[
             int | None,
-            Field(ge=4, le=4096, description="Text size in pixels; defaults to a fraction of the image."),
+            Field(ge=4, le=4096, description="Text size in pixels; defaults relative to image size."),
         ] = None,
         font_family: Annotated[
             str | None,
-            Field(description="Font name from the server's font index, e.g. DejaVuSans-Bold."),
+            Field(description="Font name from the server font index."),
         ] = None,
         colour: Annotated[tuple[int, int, int], Field(description="Text RGB colour.")] = (255, 255, 255),
-        padding: Annotated[int, Field(ge=0, le=10_000, description="Distance from the edge in pixels.")] = 16,
-        tile: Annotated[bool, Field(description="Repeat the watermark across the whole image.")] = False,
-        spacing: Annotated[int, Field(ge=0, le=10_000, description="Gap between tiles in pixels.")] = 0,
-        rotation: Annotated[float, Field(ge=-180, le=180, description="Rotate the watermark, in degrees.")] = 0.0,
-        shadow: Annotated[bool, Field(description="Draw a drop shadow behind text for legibility.")] = True,
-        stroke_width: Annotated[int, Field(ge=0, le=32, description="Outline width for text.")] = 0,
+        padding: Annotated[int, Field(ge=0, le=10_000, description="Edge padding in pixels.")] = 16,
+        tile: Annotated[bool, Field(description="Tile the watermark.")] = False,
+        spacing: Annotated[int, Field(ge=0, le=10_000, description="Tile spacing in pixels.")] = 0,
+        rotation: Annotated[float, Field(ge=-180, le=180, description="Rotation in degrees.")] = 0.0,
+        shadow: Annotated[bool, Field(description="Add a text shadow.")] = True,
+        stroke_width: Annotated[int, Field(ge=0, le=32, description="Text outline width.")] = 0,
         scale: Annotated[
             float | None,
-            Field(gt=0, le=4, description="Logo width as a fraction of the image's shorter edge."),
+            Field(gt=0, le=4, description="Logo width as a fraction of the shorter image edge."),
         ] = None,
-        output_format: Annotated[str | None, Field(description="Output codec; defaults to the input format.")] = None,
-        quality: Annotated[int | None, Field(ge=1, le=100, description="Lossy quality.")] = None,
-        strip_metadata: Annotated[bool | None, Field(description="Strip metadata from the output.")] = None,
-        output_name: Annotated[str | None, Field(description="Override the output filename.")] = None,
-        return_image: Annotated[bool, Field(description="Embed the result inline.")] = True,
-        return_base64: Annotated[bool, Field(description="Include base64 in the JSON result.")] = False,
+        output_format: Annotated[str | None, Field(description="Output format; defaults to the input format.")] = None,
+        quality: Annotated[int | None, Field(ge=1, le=100, description="Lossy quality (1-100).")] = None,
+        strip_metadata: Annotated[bool | None, Field(description="Strip metadata.")] = None,
+        output_name: Annotated[str | None, Field(description="Output filename override.")] = None,
+        return_image: Annotated[
+            bool, Field(description="Include the image inline when server configuration permits.")
+        ] = True,
+        return_base64: Annotated[bool, Field(description="Include encoded image bytes in the result.")] = False,
     ) -> ImageResult:
         with ctx.gate.slot():
             if bool(text) == bool(watermark_path):
@@ -220,46 +216,40 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
     @server.tool(
         name="image_background_remove",
         title="Remove an image background",
-        description=(
-            "Make the background transparent. method='color' keys out a flat border colour "
-            "(instant, offline, best for product/logo shots); method='ml' uses a U^2-Net model "
-            "for arbitrary backgrounds; method='auto' picks ML when the model is installed."
-        ),
+        description="Remove backgrounds: `color` keys out flat borders; `ml` handles arbitrary scenes; `auto` uses ML when available.",
     )
     @tool_guard(ctx)
     async def image_background_remove(
-        path: Annotated[str | None, Field(description="Path to the image.")] = None,
-        base64_data: Annotated[str | None, Field(description="Inline base64 image.")] = None,
-        url: Annotated[str | None, Field(description="http(s) URL to fetch.")] = None,
-        method: Annotated[str, Field(description="auto, color or ml.")] = "auto",
+        path: Annotated[str | None, Field(description="Image path inside an allowed input root.")] = None,
+        base64_data: Annotated[str | None, Field(description="Base64 image data; data URIs are accepted.")] = None,
+        url: Annotated[str | None, Field(description="HTTP(S) image URL; fetching may be disabled.")] = None,
+        method: Annotated[str, Field(description="Method: auto, color, or ml.")] = "auto",
         tolerance: Annotated[
-            float, Field(ge=0, le=441, description="Colour distance treated as background (color method).")
+            float, Field(ge=0, le=441, description="Background colour distance in color mode.")
         ] = 32.0,
-        softness: Annotated[
-            float, Field(ge=0, le=441, description="Width of the soft alpha ramp at the edges.")
-        ] = 24.0,
+        softness: Annotated[float, Field(ge=0, le=441, description="Soft edge transition width.")] = 24.0,
         edge_connected: Annotated[
             bool,
-            Field(description="Only remove background regions touching the border, protecting interior matches."),
+            Field(description="Restrict removal to regions connected to the image edge."),
         ] = True,
         model: Annotated[
-            str, Field(max_length=64, description="ML model name: u2net, u2netp, isnet-general-use, silueta.")
+            str, Field(max_length=64, description="ML model: u2net, u2netp, isnet-general-use, or silueta.")
         ] = "u2net",
-        feather: Annotated[
-            float, Field(ge=0, le=100, description="Soften the resulting alpha edge by this many pixels.")
-        ] = 0.0,
+        feather: Annotated[float, Field(ge=0, le=100, description="Alpha edge feather radius in pixels.")] = 0.0,
         background: Annotated[
             tuple[int, int, int] | None,
-            Field(description="Composite onto this RGB colour instead of leaving transparency."),
+            Field(description="RGB background for compositing instead of transparency."),
         ] = None,
         output_format: Annotated[
             str | None,
-            Field(description="Output codec; must support alpha (png, webp, avif, tiff)."),
+            Field(description="Alpha-capable format: png, webp, avif, or tiff."),
         ] = "png",
-        strip_metadata: Annotated[bool | None, Field(description="Strip metadata from the output.")] = None,
-        output_name: Annotated[str | None, Field(description="Override the output filename.")] = None,
-        return_image: Annotated[bool, Field(description="Embed the result inline.")] = True,
-        return_base64: Annotated[bool, Field(description="Include base64 in the JSON result.")] = False,
+        strip_metadata: Annotated[bool | None, Field(description="Strip metadata.")] = None,
+        output_name: Annotated[str | None, Field(description="Output filename override.")] = None,
+        return_image: Annotated[
+            bool, Field(description="Include the image inline when server configuration permits.")
+        ] = True,
+        return_base64: Annotated[bool, Field(description="Include encoded image bytes in the result.")] = False,
     ) -> ImageResult:
         with ctx.gate.slot():
             loaded = await ctx.load_input(path=path, base64_data=base64_data, url=url)
@@ -311,43 +301,37 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
     @server.tool(
         name="image_batch",
         title="Apply a pipeline to many images",
-        description=(
-            "Run the same operation list across every image in a directory, a glob, or an explicit "
-            "list of paths. Each file is independent: a failure is reported per file and does not "
-            "abort the run. Use a {name} placeholder in output_name for per-file suffixes."
-        ),
+        description="Apply one operation list to files selected by directory, glob, or paths; failures are isolated per file.",
     )
     @tool_guard(ctx)
     async def image_batch(
         directory: Annotated[
             str | None,
-            Field(description="Directory (inside an input root) to process recursively."),
+            Field(description="Input directory to scan recursively."),
         ] = None,
         glob: Annotated[
             str | None,
-            Field(description="Glob pattern inside an input root, e.g. 'photos/**/*.jpg'."),
+            Field(description="Filename glob under an input root."),
         ] = None,
         paths: Annotated[
             list[str] | None,
-            Field(max_length=256, description="Explicit list of input paths."),
+            Field(max_length=256, description="Input file paths."),
         ] = None,
         operations: Annotated[
             list[Operation],
-            Field(min_length=1, max_length=32, description="Ordered operations applied to every file."),
+            Field(min_length=1, max_length=32, description="Ordered operations for each file."),
         ] = ...,
         output_format: Annotated[
             str | None,
-            Field(description="Output codec; defaults to each input's own format."),
+            Field(description="Output format; defaults to each input."),
         ] = None,
-        quality: Annotated[int | None, Field(ge=1, le=100, description="Lossy quality for every output.")] = None,
-        strip_metadata: Annotated[bool | None, Field(description="Strip metadata from every output.")] = None,
+        quality: Annotated[int | None, Field(ge=1, le=100, description="Lossy quality (1-100).")] = None,
+        strip_metadata: Annotated[bool | None, Field(description="Strip metadata.")] = None,
         limit: Annotated[
             int | None,
-            Field(ge=1, le=10_000, description="Maximum files to process in this call."),
+            Field(ge=1, le=10_000, description="Maximum files to process."),
         ] = None,
-        return_first_image: Annotated[
-            bool, Field(description="Embed only the first output inline, to bound payload size.")
-        ] = False,
+        return_first_image: Annotated[bool, Field(description="Include only the first image inline.")] = False,
     ) -> BatchResult:
         with ctx.gate.slot():
             targets = await anyio.to_thread.run_sync(

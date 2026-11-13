@@ -151,30 +151,21 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
     @server.tool(
         name="image_list_inputs",
         title="List readable image files",
-        description=(
-            "List the files this server can read, newest first, with the `path` to pass to the "
-            "other tools. Use it to find an image you have been told about by name - an "
-            "attachment in a chat UI, for example - instead of guessing at a path or a filename. "
-            "Returns metadata only; nothing is decoded, so it is cheap to call first."
-        ),
+        description="List readable files newest-first with usable paths; returns metadata without decoding images.",
     )
     @tool_guard(ctx)
     async def image_list_inputs(
         pattern: Annotated[
             str | None,
-            Field(
-                description=(
-                    "Optional glob matched against the filename, case-insensitively, e.g. '*.png' or 'chicken*'."
-                )
-            ),
+            Field(description="Case-insensitive filename glob filter."),
         ] = None,
         limit: Annotated[
             int,
-            Field(ge=1, le=_MAX_LIMIT, description="Maximum entries to return, newest first."),
+            Field(ge=1, le=_MAX_LIMIT, description="Maximum entries to return."),
         ] = 25,
         include_outputs: Annotated[
             bool,
-            Field(description="Also list files the server produced, not just the input roots."),
+            Field(description="Include generated outputs."),
         ] = False,
     ) -> InputListing:
         import anyio

@@ -1,21 +1,4 @@
-"""Public result schema.
-
-Everything a tool returns is described here. The shapes are deliberately
-verbose but flat and self-describing, because four different consumers read
-them:
-
-* a **model** reads the text block, so the summary has to stand alone;
-* a **structured client** reads ``structuredContent``, so the JSON has to be
-  stable and complete;
-* a **vision model** reads the inline ``image`` block, so the bytes have to be
-  present when the caller asked for them;
-* a **web UI** reads a ``resource_link`` or a signed URL, so the same artefact
-  needs a fetchable address.
-
-Field names are camelCase on the wire: JSON Schema keywords and MCP itself use
-that convention, and mixing styles in one payload is a needless source of bugs
-for client authors.
-"""
+"""Public result schemas shared by tools and structured clients."""
 
 from __future__ import annotations
 
@@ -31,23 +14,23 @@ class _Model(BaseModel):
 class FileOutput(_Model):
     """One produced artefact."""
 
-    name: str = Field(description="Display filename.")
-    path: str = Field(description="Path relative to the server's output root.")
+    name: str = Field(description="Filename.")
+    path: str = Field(description="Output-root-relative path.")
     mime_type: str = Field(alias="mimeType")
-    format: str = Field(description="Canonical codec name, e.g. 'webp'.")
+    format: str = Field(description="Output codec.")
     byte_size: int = Field(alias="byteSize")
     width: int
     height: int
-    sha256: str = Field(description="SHA-256 of the encoded bytes.")
-    url: str | None = Field(default=None, description="Signed URL, when output serving is enabled.")
+    sha256: str = Field(description="SHA-256 of encoded bytes.")
+    url: str | None = Field(default=None, description="Signed URL when output serving is enabled.")
     base64: str | None = Field(
         default=None,
-        description="Base64 payload, present only when return_base64 was requested.",
+        description="Encoded bytes, included when requested.",
     )
 
 
 class SizeChange(_Model):
-    """Before/after size accounting for one operation."""
+    """Before/after byte counts."""
 
     input_bytes: int | None = Field(default=None, alias="inputBytes")
     output_bytes: int | None = Field(default=None, alias="outputBytes")
@@ -56,32 +39,25 @@ class SizeChange(_Model):
 
 
 class ImageResult(_Model):
-    """Standard envelope returned by every image tool.
-
-    ``ok`` is always true on the success path; failures are reported through
-    the MCP error channel instead, so a client never has to distinguish
-    "failed" from "empty".
-    """
+    """Shared result envelope for image tools."""
 
     ok: bool = True
-    operation: str = Field(description="Tool that produced this result.")
+    operation: str = Field(description="Producing tool.")
     outputs: list[FileOutput] = Field(default_factory=list)
-    input: dict[str, Any] | None = Field(default=None, description="Summary of the source image, when one was read.")
+    input: dict[str, Any] | None = Field(default=None, description="Source image summary.")
     size_change: SizeChange | None = Field(default=None, alias="sizeChange")
     notes: list[str] = Field(default_factory=list)
     steps: list[str] = Field(default_factory=list)
-    metrics: dict[str, Any] | None = Field(
-        default=None, description="Operation-specific measurements (e.g. comparison scores)."
-    )
+    metrics: dict[str, Any] | None = Field(default=None, description="Operation metrics.")
     inline_image_included: bool = Field(
         default=False,
         alias="inlineImageIncluded",
-        description="True when an image block accompanies this result for vision-capable clients.",
+        description="Whether the result includes an image block.",
     )
 
 
 class InfoResult(_Model):
-    """Result of inspecting an image without modifying it."""
+    """Image inspection result."""
 
     ok: bool = True
     operation: str = "image_info"
@@ -93,7 +69,7 @@ class InfoResult(_Model):
 
 
 class BatchFileResult(_Model):
-    """Per-file outcome inside a batch run."""
+    """One batch file outcome."""
 
     source: str
     status: Literal["ok", "failed", "skipped"]
@@ -104,7 +80,7 @@ class BatchFileResult(_Model):
 
 
 class BatchResult(_Model):
-    """Result of a batch operation."""
+    """Batch result."""
 
     ok: bool = True
     operation: str = "image_batch"
@@ -119,39 +95,29 @@ class BatchResult(_Model):
 
 
 class InputFile(_Model):
-    """One file that is available to read, as returned by image_list_inputs."""
+    """Readable input file."""
 
-    path: str = Field(
-        description=(
-            "Pass this as `path` to any image tool. Relative to an input root where "
-            "that is unambiguous, absolute otherwise."
-        )
-    )
-    name: str = Field(description="Filename without its directory.")
+    path: str = Field(description=("Pass as `path` to an image tool."))
+    name: str = Field(description="Filename.")
     byte_size: int = Field(alias="byteSize")
-    modified: str = Field(description="Last modification time, ISO-8601 UTC.")
-    root: str = Field(description="The input root this file was found under.")
+    modified: str = Field(description="Modified time (UTC).")
+    root: str = Field(description="Input root.")
 
 
 class InputListing(_Model):
-    """What is available to read.
-
-    Deliberately metadata only: listing must not decode anything, so it stays
-    cheap enough to call before every operation, and cannot be used to make the
-    server do work by remote control.
-    """
+    """Readable input listing."""
 
     files: list[InputFile] = Field(default_factory=list)
-    roots: list[str] = Field(default_factory=list, description="Roots that were searched, in order.")
-    scanned: int = Field(description="Directory entries examined.")
+    roots: list[str] = Field(default_factory=list, description="Searched input roots.")
+    scanned: int = Field(description="Entries scanned.")
     truncated: bool = Field(
         default=False,
-        description="True when the scan or the result limit cut the listing short.",
+        description="Whether the listing was truncated.",
     )
 
 
 class BackendReport(_Model):
-    """Runtime capability report."""
+    """Server capabilities."""
 
     ok: bool = True
     operation: str = "image_capabilities"

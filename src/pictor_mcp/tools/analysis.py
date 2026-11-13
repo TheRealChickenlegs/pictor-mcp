@@ -49,33 +49,29 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
     @server.tool(
         name="image_compare",
         title="Compare two images",
-        description=(
-            "Measure how different two images are: SSIM, RMSE, PSNR, mean and max pixel difference, "
-            "the fraction of changed pixels, and perceptual-hash distance. Use it to verify a "
-            "transform or to spot duplicate images."
-        ),
+        description="Compare images using similarity, pixel-difference, and perceptual-hash metrics; optionally save a diff image.",
     )
     @tool_guard(ctx)
     async def image_compare(
-        path: Annotated[str | None, Field(description="Path to the first image.")] = None,
-        base64_data: Annotated[str | None, Field(description="Inline base64 for the first image.")] = None,
-        url: Annotated[str | None, Field(description="URL for the first image.")] = None,
-        compare_to_path: Annotated[str | None, Field(description="Path to the second image.")] = None,
-        compare_to_base64: Annotated[str | None, Field(description="Inline base64 for the second image.")] = None,
-        compare_to_url: Annotated[str | None, Field(description="URL for the second image.")] = None,
+        path: Annotated[str | None, Field(description="First image path.")] = None,
+        base64_data: Annotated[str | None, Field(description="First image as base64.")] = None,
+        url: Annotated[str | None, Field(description="First image URL.")] = None,
+        compare_to_path: Annotated[str | None, Field(description="Second image path.")] = None,
+        compare_to_base64: Annotated[str | None, Field(description="Second image as base64.")] = None,
+        compare_to_url: Annotated[str | None, Field(description="Second image URL.")] = None,
         align: Annotated[
             bool,
-            Field(description="Resize the second image to the first's dimensions before comparing."),
+            Field(description="Resize the second image to match the first."),
         ] = True,
         change_threshold: Annotated[
             int,
-            Field(ge=0, le=255, description="Per-pixel difference counted as a change."),
+            Field(ge=0, le=255, description="Pixel-difference threshold."),
         ] = 8,
         create_diff_image: Annotated[
             bool,
-            Field(description="Also write a visual difference image (white where identical)."),
+            Field(description="Save a diff image; matching pixels are white."),
         ] = False,
-        diff_amplify: Annotated[float, Field(ge=1, le=20, description="Amplify the diff visually.")] = 4.0,
+        diff_amplify: Annotated[float, Field(ge=1, le=20, description="Visual diff amplification.")] = 4.0,
     ) -> ImageResult:
         with ctx.gate.slot():
             first = await ctx.load_input(path=path, base64_data=base64_data, url=url)
@@ -137,35 +133,31 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
     @server.tool(
         name="image_optimize_web",
         title="Produce responsive web variants",
-        description=(
-            "Turn one source image into a set of web-ready variants at several widths, each "
-            "optionally constrained to a maximum file size, plus a tiny blurred placeholder and a "
-            "ready-to-paste srcset. This is the one call to use for 'make this web-ready'."
-        ),
+        description="Generate responsive variants, optional size limits, a blurred placeholder, and a ready-to-use `srcset`.",
     )
     @tool_guard(ctx)
     async def image_optimize_web(
-        path: Annotated[str | None, Field(description="Path to the source image.")] = None,
-        base64_data: Annotated[str | None, Field(description="Inline base64 source image.")] = None,
-        url: Annotated[str | None, Field(description="http(s) URL to fetch.")] = None,
+        path: Annotated[str | None, Field(description="Source image path.")] = None,
+        base64_data: Annotated[str | None, Field(description="Source image as base64.")] = None,
+        url: Annotated[str | None, Field(description="HTTP(S) source URL; fetching may be disabled.")] = None,
         widths: Annotated[
             list[Annotated[int, Field(ge=1, le=100_000)]] | None,
             Field(
                 max_length=12,
-                description="Target widths, e.g. [480, 960, 1440]. Defaults to a sensible ladder.",
+                description="Output widths in pixels; defaults to an automatic set.",
             ),
         ] = None,
-        output_format: Annotated[str, Field(description="Output codec: webp, avif or jpeg.")] = "webp",
-        quality: Annotated[int, Field(ge=1, le=100, description="Starting quality for each variant.")] = 82,
+        output_format: Annotated[str, Field(description="Output format: webp, avif, jpeg, or png.")] = "webp",
+        quality: Annotated[int, Field(ge=1, le=100, description="Starting lossy quality (1-100).")] = 82,
         max_bytes_per_variant: Annotated[
             int | None,
-            Field(gt=0, description="Per-variant byte ceiling; quality is searched down per width to fit."),
+            Field(gt=0, description="Maximum bytes per variant; quality is reduced to fit."),
         ] = None,
         create_placeholder: Annotated[
             bool,
-            Field(description="Also produce a tiny blurred placeholder and its base64 data URI."),
+            Field(description="Create a blurred placeholder and data URI."),
         ] = True,
-        strip_metadata: Annotated[bool | None, Field(description="Strip metadata from every variant.")] = True,
+        strip_metadata: Annotated[bool | None, Field(description="Strip metadata.")] = True,
     ) -> ImageResult:
         with ctx.gate.slot():
             loaded = await ctx.load_input(path=path, base64_data=base64_data, url=url)

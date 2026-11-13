@@ -65,24 +65,11 @@ logger = logging.getLogger("pictor_mcp")
 _AUTH_EXEMPT = ("/healthz",)
 
 INSTRUCTIONS = """\
-Image operations server. It can inspect, convert, resize, compress, crop, rotate,
-watermark, optimise and background-remove images, and run the same pipeline over
-many files at once.
-
-How to use it well:
-- Prefer `image_transform` when you need more than one step: pass an ordered
-  `operations` list and the image crosses the wire only once.
-- Use `image_capabilities` if you are unsure which formats or features exist.
-- Input can be a `path` inside the server's input root, `base64_data`, or a `url`
-  (URL fetching may be disabled). Supply exactly one.
-- Every result is written to the server's output root and described in the
-  response. The text block always states the relative path, dimensions, byte
-  sizes and any saving, so you do not need to re-inspect the file.
-- Results also include `structuredContent` for programmatic use, and an inline
-  image when `return_image` is true so vision-capable clients can see the output.
-- Metadata (EXIF, GPS, ICC) is stripped by default; pass `strip_metadata=false`
-  only when a downstream step genuinely needs it.
-- Use `image_compare` to verify that a transform did what you intended.
+Use `image_transform` to combine steps; `image_capabilities` lists supported features.
+Supply exactly one of `path`, `base64_data`, or `url`. Paths must be inside an input root;
+URL fetch may be disabled and accepts only public, credential-free addresses.
+Outputs are saved under the output root. Inline images require server configuration;
+EXIF, GPS, and ICC metadata are stripped by default.
 """
 
 
@@ -191,10 +178,7 @@ def build_server(config: Config, ctx: ToolContext):
     server = MCPServer(
         name="pictor-mcp",
         title="Pictor image operations",
-        description=(
-            "Secure image processing: convert, resize, compress, crop, rotate, watermark, "
-            "background-remove, batch and optimise for the web."
-        ),
+        description="Image inspection and processing tools.",
         instructions=INSTRUCTIONS,
         version=__version__,
         log_level=config.log_level,

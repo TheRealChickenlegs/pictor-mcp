@@ -35,59 +35,39 @@ logger = logging.getLogger(__name__)
 
 _PathArg = Annotated[
     str | None,
-    Field(
-        description=(
-            "Path to the image, relative to an allowed input root (or absolute inside one). "
-            "This is the only way to read a file that is on the server's own network: a URL "
-            "pointing at a LAN or container address is refused by the SSRF guard."
-        )
-    ),
+    Field(description="Image path inside an allowed input root."),
 ]
 _Base64Arg = Annotated[
     str | None,
-    Field(description="Inline image bytes as base64, optionally a data: URI."),
+    Field(description="Base64 image data; data URIs are accepted."),
 ]
 _UrlArg = Annotated[
     str | None,
-    Field(
-        description=(
-            "http(s) URL to fetch. Disabled unless PICTOR_ALLOW_NET_FETCH=true, and the address "
-            "must be publicly routable: private, loopback and link-local targets are refused, as "
-            "are URLs that require credentials."
-        )
-    ),
+    Field(description="HTTP(S) image URL; fetching may be disabled."),
 ]
 _FormatArg = Annotated[
     str | None,
-    Field(
-        description="Output codec: jpeg, png, webp, avif, tiff, gif, bmp, ico, jpeg2000, qoi, ppm. Defaults to the input format."
-    ),
+    Field(description="Output format; defaults to the input format."),
 ]
 _QualityArg = Annotated[
     int | None,
-    Field(ge=1, le=100, description="Lossy quality 1-100 (higher is better quality and larger)."),
+    Field(ge=1, le=100, description="Lossy quality (1-100)."),
 ]
 _ReturnImageArg = Annotated[
     bool,
-    Field(
-        description=(
-            "Embed the resulting image inline so vision-capable clients can see it. "
-            "Only has an effect when the server allows inlining (PICTOR_INLINE_IMAGES=true); "
-            "it is off by default because the base64 payload is large."
-        )
-    ),
+    Field(description="Include the image inline when server configuration permits."),
 ]
 _ReturnBase64Arg = Annotated[
     bool,
-    Field(description="Include the base64 payload in the JSON result for clients without file access."),
+    Field(description="Include encoded image bytes in the result."),
 ]
 _OutputNameArg = Annotated[
     str | None,
-    Field(description="Override the output filename (a safe name is derived if omitted)."),
+    Field(description="Output filename override."),
 ]
 _StripArg = Annotated[
     bool | None,
-    Field(description="Remove EXIF/GPS/ICC metadata. Defaults to the server setting (on)."),
+    Field(description="Strip EXIF/GPS/ICC metadata; defaults to the server setting."),
 ]
 
 
@@ -129,11 +109,7 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
     @server.tool(
         name="image_capabilities",
         title="Image server capabilities",
-        description=(
-            "Report what this image server can do: supported formats, available operations, "
-            "resource limits, security posture, and whether GPU acceleration is active. "
-            "Call this first when you are unsure which formats or features are available."
-        ),
+        description="Report supported formats and operations, limits, security settings, and active acceleration.",
     )
     @tool_guard(ctx)
     async def image_capabilities() -> BackendReport:
@@ -226,10 +202,7 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
     @server.tool(
         name="image_info",
         title="Inspect an image",
-        description=(
-            "Read an image's metadata without modifying it: dimensions, format, colour mode, "
-            "animation frames, EXIF, perceptual hashes and dominant colours."
-        ),
+        description="Inspect image dimensions, format, animation, EXIF, perceptual hashes, and dominant colours.",
     )
     @tool_guard(ctx)
     async def image_info(
@@ -298,37 +271,31 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
     @server.tool(
         name="image_convert",
         title="Convert image format",
-        description=(
-            "Convert an image between formats (JPEG, PNG, WebP, AVIF, TIFF, GIF, BMP, ICO, "
-            "JPEG 2000, QOI, PPM), controlling quality, losslessness and metadata. SVG input is "
-            "accepted and rasterised, but SVG is never a target format."
-        ),
+        description="Convert image formats; SVG is accepted as input but not as an output format.",
     )
     @tool_guard(ctx)
     async def image_convert(
         path: _PathArg = None,
         base64_data: _Base64Arg = None,
         url: _UrlArg = None,
-        target_format: Annotated[str, Field(description="Target codec, e.g. 'webp', 'png', 'avif'.")] = "webp",
+        target_format: Annotated[str, Field(description="Target output format.")] = "webp",
         quality: _QualityArg = None,
-        lossless: Annotated[bool, Field(description="Use the codec's lossless mode where supported.")] = False,
+        lossless: Annotated[bool, Field(description="Prefer lossless encoding when supported.")] = False,
         progressive: Annotated[bool, Field(description="Write a progressive JPEG.")] = False,
         effort: Annotated[
             int | None,
             Field(
                 ge=0,
                 le=10,
-                description="Encoder effort: WebP method 0-6 or AVIF speed (inverted). Higher is slower and smaller.",
+                description="Encoder effort; higher is slower and usually smaller.",
             ),
         ] = None,
         background: Annotated[
             tuple[int, int, int] | None,
-            Field(description="RGB colour used to flatten transparency when the target has no alpha channel."),
+            Field(description="RGB background for formats without alpha."),
         ] = None,
         strip_metadata: _StripArg = None,
-        keep_icc: Annotated[
-            bool, Field(description="Keep the ICC colour profile even when other metadata is stripped.")
-        ] = False,
+        keep_icc: Annotated[bool, Field(description="Preserve the ICC profile.")] = False,
         output_name: _OutputNameArg = None,
         return_image: _ReturnImageArg = True,
         return_base64: _ReturnBase64Arg = False,
@@ -367,42 +334,32 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
     @server.tool(
         name="image_resize",
         title="Resize an image",
-        description=(
-            "Resize by width, height, percentage, or to fit a box. Supports contain, cover, fill, "
-            "inside, outside and pad fit modes, all resampling filters, and optional format change."
-        ),
+        description="Resize by width, height, percentage, or box; supports fit modes and format conversion.",
     )
     @tool_guard(ctx)
     async def image_resize(
         path: _PathArg = None,
         base64_data: _Base64Arg = None,
         url: _UrlArg = None,
-        width: Annotated[int | None, Field(ge=1, le=100_000, description="Target width in pixels.")] = None,
-        height: Annotated[int | None, Field(ge=1, le=100_000, description="Target height in pixels.")] = None,
+        width: Annotated[int | None, Field(ge=1, le=100_000, description="Width in pixels.")] = None,
+        height: Annotated[int | None, Field(ge=1, le=100_000, description="Height in pixels.")] = None,
         percent: Annotated[
             float | None, Field(gt=0, le=1000, description="Scale by this percentage of the original.")
         ] = None,
         fit: Annotated[
             str,
-            Field(
-                description=(
-                    "contain (fit inside, keep ratio), cover (fill and crop), fill (stretch), "
-                    "inside (contain but never enlarge), outside (cover without cropping), pad (contain then pad)"
-                )
-            ),
+            Field(description="contain, cover, fill, inside, outside, or pad; see operation semantics."),
         ] = "contain",
         filter: Annotated[
             str | None,
-            Field(description="nearest, box, bilinear, hamming, bicubic, lanczos, or auto."),
+            Field(description="Resampling filter: nearest, box, bilinear, hamming, bicubic, lanczos, or auto."),
         ] = None,
         only_shrink: Annotated[bool, Field(description="Never enlarge; leave smaller images untouched.")] = False,
         background: Annotated[
             tuple[int, int, int, int] | None,
-            Field(description="RGBA fill used by pad and rotate."),
+            Field(description="RGBA fill for padding."),
         ] = None,
-        gravity: Annotated[
-            str, Field(description="Anchor for cover cropping or padding, e.g. center, top, bottom-right.")
-        ] = "center",
+        gravity: Annotated[str, Field(description="Anchor for cropping or padding.")] = "center",
         output_format: _FormatArg = None,
         quality: _QualityArg = None,
         strip_metadata: _StripArg = None,
@@ -452,10 +409,7 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
     @server.tool(
         name="image_compress",
         title="Compress an image",
-        description=(
-            "Reduce an image's file size, either by a quality level or by searching for the best "
-            "quality that stays under a target size. Reports the exact saving achieved."
-        ),
+        description="Compress by quality or target file size; reports the achieved saving.",
     )
     @tool_guard(ctx)
     async def image_compress(
@@ -465,7 +419,7 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
         quality: _QualityArg = None,
         target_size_kb: Annotated[
             float | None,
-            Field(gt=0, le=1_048_576, description="Target maximum file size in kilobytes; quality is searched to fit."),
+            Field(gt=0, le=1_048_576, description="Maximum output size in KB; quality is adjusted to fit."),
         ] = None,
         target_format: _FormatArg = None,
         lossless: Annotated[bool, Field(description="Prefer lossless compression where supported.")] = False,
@@ -526,9 +480,7 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
     @server.tool(
         name="image_crop",
         title="Crop an image",
-        description=(
-            "Crop by explicit pixel box, by aspect ratio with a gravity anchor, or auto-trim a uniform border."
-        ),
+        description="Crop by pixel box, aspect ratio, or uniform-border trim.",
     )
     @tool_guard(ctx)
     async def image_crop(
@@ -537,18 +489,16 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
         url: _UrlArg = None,
         box: Annotated[
             tuple[int, int, int, int] | None,
-            Field(description="Explicit (left, top, right, bottom) box in pixels."),
+            Field(description="Crop box: left, top, right, bottom."),
         ] = None,
         aspect_ratio: Annotated[
             float | None,
-            Field(gt=0, le=100, description="Crop to this width/height ratio, e.g. 1.0 for square, 1.7778 for 16:9."),
+            Field(gt=0, le=100, description="Crop width ÷ height ratio."),
         ] = None,
-        gravity: Annotated[str, Field(description="Which part to keep: center, top, bottom-left, ...")] = "center",
-        trim: Annotated[
-            bool, Field(description="Auto-remove a uniform border instead of using box/aspect_ratio.")
-        ] = False,
-        trim_tolerance: Annotated[int, Field(ge=0, le=255, description="Colour tolerance for trimming.")] = 12,
-        clamp: Annotated[bool, Field(description="Clip a box that falls outside the image instead of failing.")] = True,
+        gravity: Annotated[str, Field(description="Crop anchor, e.g. center or top-left.")] = "center",
+        trim: Annotated[bool, Field(description="Trim a uniform border.")] = False,
+        trim_tolerance: Annotated[int, Field(ge=0, le=255, description="Border colour tolerance.")] = 12,
+        clamp: Annotated[bool, Field(description="Clamp crop box to image bounds.")] = True,
         output_format: _FormatArg = None,
         quality: _QualityArg = None,
         strip_metadata: _StripArg = None,
@@ -598,10 +548,7 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
     @server.tool(
         name="image_rotate",
         title="Rotate or flip an image",
-        description=(
-            "Rotate by any angle, mirror horizontally or vertically, and/or apply the EXIF "
-            "orientation so the pixels match what a viewer shows."
-        ),
+        description="Rotate, flip, or apply EXIF orientation.",
     )
     @tool_guard(ctx)
     async def image_rotate(
@@ -611,10 +558,10 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
         angle: Annotated[float, Field(ge=-360, le=360, description="Degrees counter-clockwise.")] = 0.0,
         flip: Annotated[
             str | None,
-            Field(description="Mirror the image: horizontal, vertical or both."),
+            Field(description="Flip direction: horizontal, vertical, or both."),
         ] = None,
-        auto_orient: Annotated[bool, Field(description="Apply the EXIF orientation tag first.")] = True,
-        expand: Annotated[bool, Field(description="Grow the canvas so rotation does not clip corners.")] = True,
+        auto_orient: Annotated[bool, Field(description="Apply EXIF orientation first.")] = True,
+        expand: Annotated[bool, Field(description="Expand canvas to prevent clipping.")] = True,
         background: Annotated[
             tuple[int, int, int, int] | None, Field(description="RGBA fill for exposed areas.")
         ] = None,
@@ -671,10 +618,7 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
     @server.tool(
         name="image_thumbnail",
         title="Create a thumbnail",
-        description=(
-            "Produce a thumbnail of an exact size, choosing the crop by saliency (attention or "
-            "entropy) instead of blindly taking the centre."
-        ),
+        description="Create a thumbnail with attention-, entropy-, or center-based cropping.",
     )
     @tool_guard(ctx)
     async def image_thumbnail(
@@ -683,21 +627,17 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
         url: _UrlArg = None,
         size: Annotated[
             tuple[int, int] | None,
-            Field(description="Exact (width, height) of the thumbnail."),
+            Field(description="Thumbnail width and height."),
         ] = None,
         max_dimension: Annotated[
             int | None,
-            Field(
-                ge=1, le=100_000, description="Shorter alternative: fit within a square of this size, keeping ratio."
-            ),
+            Field(ge=1, le=100_000, description="Fit within a square of this size, preserving ratio."),
         ] = None,
         method: Annotated[
             str,
-            Field(description="attention (edge energy), entropy (local detail) or center."),
+            Field(description="Crop method: attention, entropy, or center."),
         ] = "attention",
-        sharpen: Annotated[
-            float, Field(ge=0, le=5, description="Unsharp-mask amount applied after resizing; 0 disables.")
-        ] = 0.6,
+        sharpen: Annotated[float, Field(ge=0, le=5, description="Sharpening amount; 0 disables.")] = 0.6,
         output_format: _FormatArg = None,
         quality: _QualityArg = None,
         strip_metadata: _StripArg = None,

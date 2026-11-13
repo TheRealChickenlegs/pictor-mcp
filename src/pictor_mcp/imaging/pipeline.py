@@ -36,45 +36,35 @@ class _Operation(BaseModel):
 class AutoOrientOperation(_Operation):
     op: Literal["auto_orient"] = Field(
         default="auto_orient",
-        description="Apply the EXIF orientation tag to the pixels.",
+        description="Apply EXIF orientation.",
     )
 
 
 class ResizeOperation(_Operation):
     op: Literal["resize"] = "resize"
-    width: int | None = Field(default=None, ge=1, le=100_000, description="Target width in pixels.")
-    height: int | None = Field(default=None, ge=1, le=100_000, description="Target height in pixels.")
+    width: int | None = Field(default=None, ge=1, le=100_000, description="Width in pixels.")
+    height: int | None = Field(default=None, ge=1, le=100_000, description="Height in pixels.")
     percent: float | None = Field(
-        default=None, gt=0, le=1000, description="Scale by a percentage; overrides width/height."
+        default=None, gt=0, le=1000, description="Scale percentage; overrides width and height."
     )
     fit: Literal["contain", "cover", "fill", "inside", "outside", "pad"] = Field(
         default="contain",
-        description=(
-            "contain: fit inside, keep ratio. cover: fill then centre-crop. fill: stretch. "
-            "inside: like contain but never enlarge. outside: scale to cover without cropping. "
-            "pad: contain then pad to the exact box."
-        ),
+        description="contain preserves ratio inside; cover crops; fill stretches; inside never enlarges; outside avoids cropping; pad adds borders.",
     )
-    filter: str | None = Field(default=None, description="nearest, box, bilinear, hamming, bicubic, lanczos, or auto.")
-    only_shrink: bool = Field(default=False, description="Never enlarge the image.")
-    background: tuple[int, int, int, int] = Field(
-        default=(255, 255, 255, 0), description="Pad/rotate fill colour, RGBA."
-    )
-    gravity: str = Field(default="center", description="Anchor for cover cropping and padding.")
+    filter: str | None = Field(default=None, description="Resampling filter.")
+    only_shrink: bool = Field(default=False, description="Prevent enlargement.")
+    background: tuple[int, int, int, int] = Field(default=(255, 255, 255, 0), description="RGBA padding colour.")
+    gravity: str = Field(default="center", description="Crop or padding anchor.")
 
 
 class CropOperation(_Operation):
     op: Literal["crop"] = "crop"
-    box: tuple[int, int, int, int] | None = Field(
-        default=None, description="Explicit (left, top, right, bottom) pixel box."
-    )
-    aspect_ratio: float | None = Field(
-        default=None, gt=0, description="Crop to this width/height ratio, e.g. 1.0 or 1.7778."
-    )
-    gravity: str = Field(default="center", description="Which part of the image to keep when cropping to a ratio.")
-    clamp: bool = Field(default=True, description="Clip an out-of-bounds box instead of failing.")
-    trim: bool = Field(default=False, description="Auto-remove a uniform border instead of using box/aspect_ratio.")
-    trim_tolerance: int = Field(default=12, ge=0, le=255, description="Colour tolerance for border trimming.")
+    box: tuple[int, int, int, int] | None = Field(default=None, description="Crop box: left, top, right, bottom.")
+    aspect_ratio: float | None = Field(default=None, gt=0, description="Crop width ÷ height ratio.")
+    gravity: str = Field(default="center", description="Crop anchor.")
+    clamp: bool = Field(default=True, description="Clamp box to image bounds.")
+    trim: bool = Field(default=False, description="Trim a uniform border.")
+    trim_tolerance: int = Field(default=12, ge=0, le=255, description="Border colour tolerance.")
 
     @field_validator("box")
     @classmethod
@@ -89,7 +79,7 @@ class CropOperation(_Operation):
 class RotateOperation(_Operation):
     op: Literal["rotate"] = "rotate"
     angle: float = Field(description="Degrees counter-clockwise.")
-    expand: bool = Field(default=True, description="Grow the canvas so nothing is clipped.")
+    expand: bool = Field(default=True, description="Expand canvas to prevent clipping.")
     background: tuple[int, int, int, int] = Field(default=(255, 255, 255, 0))
     filter: str = Field(default="bicubic")
 
@@ -101,7 +91,7 @@ class FlipOperation(_Operation):
 
 class SharpenOperation(_Operation):
     op: Literal["sharpen"] = "sharpen"
-    amount: float = Field(default=1.0, ge=0, le=10, description="Unsharp-mask strength; 0 disables.")
+    amount: float = Field(default=1.0, ge=0, le=10, description="Sharpening amount; 0 disables.")
 
 
 class BlurOperation(_Operation):
@@ -114,9 +104,9 @@ class SmartCropOperation(_Operation):
     width: int = Field(ge=1, le=100_000)
     height: int = Field(ge=1, le=100_000)
     method: Literal["attention", "entropy", "center"] = Field(
-        default="attention", description="Saliency proxy used to choose the crop window."
+        default="attention", description="Crop method: attention, entropy, or center."
     )
-    scale: bool = Field(default=True, description="Scale to cover the target before cropping.")
+    scale: bool = Field(default=True, description="Scale to cover before cropping.")
 
 
 class WatermarkTextOperation(_Operation):
@@ -125,12 +115,10 @@ class WatermarkTextOperation(_Operation):
     position: str = Field(default="bottom-right")
     opacity: float = Field(default=0.6, ge=0, le=1)
     font_size: int | None = Field(default=None, ge=4, le=4096)
-    font_family: str | None = Field(
-        default=None, description="Font name from the server's font index, e.g. DejaVuSans-Bold."
-    )
+    font_family: str | None = Field(default=None, description="Font name from the server font index.")
     colour: tuple[int, int, int] = Field(default=(255, 255, 255))
     padding: int = Field(default=16, ge=0, le=10_000)
-    tile: bool = Field(default=False, description="Repeat the watermark across the whole image.")
+    tile: bool = Field(default=False, description="Tile the watermark.")
     spacing: int = Field(default=0, ge=0, le=10_000)
     rotation: float = Field(default=0.0, ge=-180, le=180)
     shadow: bool = Field(default=True)
@@ -139,12 +127,10 @@ class WatermarkTextOperation(_Operation):
 
 class WatermarkImageOperation(_Operation):
     op: Literal["watermark_image"] = "watermark_image"
-    path: str = Field(description="Path to the watermark image, inside a configured input root.")
+    path: str = Field(description="Watermark image path inside an input root.")
     position: str = Field(default="bottom-right")
     opacity: float = Field(default=0.6, ge=0, le=1)
-    scale: float | None = Field(
-        default=None, gt=0, le=4, description="Width as a fraction of the image's shorter edge."
-    )
+    scale: float | None = Field(default=None, gt=0, le=4, description="Width as a fraction of the shorter image edge.")
     padding: int = Field(default=16, ge=0, le=10_000)
     tile: bool = Field(default=False)
     spacing: int = Field(default=0, ge=0, le=10_000)
@@ -155,13 +141,9 @@ class BackgroundRemoveOperation(_Operation):
     method: Literal["auto", "color", "ml"] = Field(default="auto")
     tolerance: float = Field(default=32.0, ge=0, le=441)
     softness: float = Field(default=24.0, ge=0, le=441)
-    edge_connected: bool = Field(
-        default=True, description="Only remove background-coloured regions touching the border."
-    )
+    edge_connected: bool = Field(default=True, description="Limit removal to edge-connected regions.")
     model: str = Field(default="u2net", max_length=64)
-    background: tuple[int, int, int, int] | None = Field(
-        default=None, description="Composite onto this colour instead of leaving transparency."
-    )
+    background: tuple[int, int, int, int] | None = Field(default=None, description="RGBA background for compositing.")
 
 
 class FeatherOperation(_Operation):
