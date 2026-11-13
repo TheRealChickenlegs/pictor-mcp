@@ -58,7 +58,7 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
             "watermark_text, watermark_image, background_remove, feather."
         ),
     )
-    @tool_guard
+    @tool_guard(ctx)
     async def image_transform(
         path: Annotated[str | None, Field(description="Path to the image, inside an allowed input root.")] = None,
         base64_data: Annotated[str | None, Field(description="Inline base64 image, optionally a data: URI.")] = None,
@@ -119,7 +119,7 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
             "Supply either 'text' or 'watermark_path'."
         ),
     )
-    @tool_guard
+    @tool_guard(ctx)
     async def image_watermark(
         path: Annotated[str | None, Field(description="Path to the base image.")] = None,
         base64_data: Annotated[str | None, Field(description="Inline base64 base image.")] = None,
@@ -226,7 +226,7 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
             "for arbitrary backgrounds; method='auto' picks ML when the model is installed."
         ),
     )
-    @tool_guard
+    @tool_guard(ctx)
     async def image_background_remove(
         path: Annotated[str | None, Field(description="Path to the image.")] = None,
         base64_data: Annotated[str | None, Field(description="Inline base64 image.")] = None,
@@ -317,7 +317,7 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
             "abort the run. Use a {name} placeholder in output_name for per-file suffixes."
         ),
     )
-    @tool_guard
+    @tool_guard(ctx)
     async def image_batch(
         directory: Annotated[
             str | None,

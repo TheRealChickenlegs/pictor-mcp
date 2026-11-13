@@ -135,9 +135,8 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
             "Call this first when you are unsure which formats or features are available."
         ),
     )
-    @tool_guard
+    @tool_guard(ctx)
     async def image_capabilities() -> BackendReport:
-        from ..backends import gpu_device_info
         from ..imaging.background import ml_available
         from ..imaging.formats import public_format_catalogue
         from ..imaging.pipeline import describe_operations
@@ -204,7 +203,7 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
             limits=limits,
             security=security,
             backends=ctx.registry.to_public_dict(),
-            gpu=gpu_device_info(),
+            gpu=ctx.registry.gpu_device_info(),
             notes=[
                 "Image is written to the output root and returned as a URL in the result text.",
                 "Inline image bytes are off unless PICTOR_INLINE_IMAGES=true; prefer the markdown URL.",
@@ -232,7 +231,7 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
             "animation frames, EXIF, perceptual hashes and dominant colours."
         ),
     )
-    @tool_guard
+    @tool_guard(ctx)
     async def image_info(
         path: _PathArg = None,
         base64_data: _Base64Arg = None,
@@ -305,7 +304,7 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
             "accepted and rasterised, but SVG is never a target format."
         ),
     )
-    @tool_guard
+    @tool_guard(ctx)
     async def image_convert(
         path: _PathArg = None,
         base64_data: _Base64Arg = None,
@@ -373,7 +372,7 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
             "inside, outside and pad fit modes, all resampling filters, and optional format change."
         ),
     )
-    @tool_guard
+    @tool_guard(ctx)
     async def image_resize(
         path: _PathArg = None,
         base64_data: _Base64Arg = None,
@@ -458,7 +457,7 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
             "quality that stays under a target size. Reports the exact saving achieved."
         ),
     )
-    @tool_guard
+    @tool_guard(ctx)
     async def image_compress(
         path: _PathArg = None,
         base64_data: _Base64Arg = None,
@@ -531,7 +530,7 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
             "Crop by explicit pixel box, by aspect ratio with a gravity anchor, or auto-trim a uniform border."
         ),
     )
-    @tool_guard
+    @tool_guard(ctx)
     async def image_crop(
         path: _PathArg = None,
         base64_data: _Base64Arg = None,
@@ -604,7 +603,7 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
             "orientation so the pixels match what a viewer shows."
         ),
     )
-    @tool_guard
+    @tool_guard(ctx)
     async def image_rotate(
         path: _PathArg = None,
         base64_data: _Base64Arg = None,
@@ -677,7 +676,7 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
             "entropy) instead of blindly taking the centre."
         ),
     )
-    @tool_guard
+    @tool_guard(ctx)
     async def image_thumbnail(
         path: _PathArg = None,
         base64_data: _Base64Arg = None,

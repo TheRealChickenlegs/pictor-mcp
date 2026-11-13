@@ -595,8 +595,8 @@ paths or library internals, so they are safe to show a model.
 ## GPU acceleration
 
 The CPU image is the default and needs no GPU. If you have an NVIDIA card,
-switch to the CUDA image with an overlay; acceleration is then detected
-automatically.
+switch to the CUDA image with an overlay; acceleration is initialized lazily on
+the first eligible GPU operation, not when the server starts.
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
@@ -616,8 +616,9 @@ and `IMAGE_TAG_GPU` pins an exact one.
 **The CUDA line must cover your card's architecture.** The image installs a
 CUDA 12.8 build (`cu128`), which carries kernels for Turing through Blackwell
 (RTX 50-series). A card newer than the build will load, appear available, and
-then fail every kernel launch. The server detects this at startup, disables the
-GPU, and says so in plain terms:
+then fail every kernel launch. The isolated GPU worker detects this on the
+first eligible resize, disables resize acceleration without interrupting the
+request, and says so in plain terms:
 
 ```
 GPU acceleration unavailable: RTX 5060 Ti (torch ..., cuda ...) is sm_120, which
@@ -625,9 +626,17 @@ this PyTorch build has no kernels for; it supports sm_50, ..., sm_90. This build
 predates that architecture. Rebuild with a CUDA 12.8 or newer wheel index ...
 ```
 
-The same text appears in `image_capabilities`, so an agent can report it. To
-change it, override the index at build time — and note the coupling, since an
-index only helps if it still publishes wheels for the base image's Python:
+The same text appears in `image_capabilities`, so an agent can report it. CUDA
+resize and `onnxruntime-gpu` background removal run in a separate child process;
+the MCP server itself never creates the CUDA context. The worker is terminated
+by default 300 seconds after the last tool call, releasing its context and VRAM
+for other containers. Set `PICTOR_GPU_IDLE_SECONDS` to change the timeout (0
+means terminate as soon as the active tool call completes). The first GPU call
+after startup or an idle shutdown pays the worker/model initialization delay.
+
+To change the CUDA wheel index, override it at build time — and note the
+coupling, since an index only helps if it still publishes wheels for the base
+image's Python:
 
 ```yaml
 build:
@@ -885,7 +894,9 @@ The most consequential ones:
 | `PICTOR_MAX_CONCURRENCY` | `4` | Concurrent operations; size with `mem_limit`. |
 | `PICTOR_STRIP_METADATA` | `true` | Strip EXIF/GPS/ICC from outputs. |
 | `PICTOR_ALLOWED_HOSTS` | loopback + `pictor-mcp:*` in Docker | Host headers accepted. Add a name if a client is refused; see [Connecting from another container](#connecting-from-another-container). |
-| `PICTOR_GPU` | `off` (`auto` in the GPU image) | `auto`, `off` or `torch`. |
+| `PICTOR_GPU` | `off` (`auto` in the GPU image) | `auto`, `off`, `torch` or `cuda`; controls CUDA resize (ML background GPU use remains isolated). |
+| `PICTOR_GPU_MIN_PIXELS` | `4000000` | Smaller resizes stay on the CPU. |
+| `PICTOR_GPU_IDLE_SECONDS` | `300` | Terminate the isolated GPU worker after this many seconds without any tool call; `0` releases it as soon as the current call finishes. |
 
 Invalid values make the server **refuse to start** rather than fall back to a
 less safe default.

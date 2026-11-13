@@ -106,6 +106,7 @@ class ToolContext:
                 fonts=self.fonts,
                 overlays=overlays,
                 resampler_for=self.registry.resampler_for,
+                ml_remover=self.registry.remove_background_ml,
                 deadline=deadline,
             )
             return outcome.image, outcome.notes, outcome.steps
@@ -169,6 +170,7 @@ class ToolContext:
                 fonts=self.fonts,
                 overlays=overlays,
                 resampler_for=self.registry.resampler_for,
+                ml_remover=self.registry.remove_background_ml,
                 deadline=deadline,
             )
             spec = resolve_output_format(fmt)
@@ -318,31 +320,35 @@ def error_result(exc: PictorError) -> CallToolResult:
     )
 
 
-def tool_guard(fn: Callable[..., Any]) -> Callable[..., Any]:
-    """Turn expected failures into structured MCP errors.
+def tool_guard(ctx: ToolContext):
+    """Wrap a tool with structured errors and GPU-idle activity tracking.
 
     Applied under ``@server.tool`` so the SDK still introspects the original
     signature (``functools.wraps`` preserves ``__wrapped__`` and
-    ``__annotations__``, which is what schema generation reads).
-
-    Anything not derived from :class:`~pictor_mcp.errors.PictorError` is a bug,
-    not a user error: it is logged with a traceback and reported to the client
-    as a neutral internal failure, never with its original text, which could
-    disclose a filesystem path or a library detail.
+    ``__annotations__``, which is what schema generation reads). Anything not
+    derived from :class:`~pictor_mcp.errors.PictorError` is logged as a bug and
+    reported neutrally, never with a filesystem path or library detail.
     """
 
-    @functools.wraps(fn)
-    async def wrapper(*args: Any, **kwargs: Any) -> Any:
-        try:
-            return await fn(*args, **kwargs)
-        except PictorError as exc:
-            logger.info("tool %s rejected the request: [%s] %s", fn.__name__, exc.code, exc.message)
-            return error_result(exc)
-        except Exception:
-            logger.exception("tool %s crashed", fn.__name__)
-            return error_result(PictorError("the operation could not be completed due to an internal error"))
+    def decorate(fn: Callable[..., Any]) -> Callable[..., Any]:
+        @functools.wraps(fn)
+        async def wrapper(*args: Any, **kwargs: Any) -> Any:
+            ctx.registry.begin_tool_call()
+            try:
+                try:
+                    return await fn(*args, **kwargs)
+                except PictorError as exc:
+                    logger.info("tool %s rejected the request: [%s] %s", fn.__name__, exc.code, exc.message)
+                    return error_result(exc)
+                except Exception:
+                    logger.exception("tool %s crashed", fn.__name__)
+                    return error_result(PictorError("the operation could not be completed due to an internal error"))
+            finally:
+                ctx.registry.end_tool_call()
 
-    return wrapper
+        return wrapper
+
+    return decorate
 
 
 __all__ = [

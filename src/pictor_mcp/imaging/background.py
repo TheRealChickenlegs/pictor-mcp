@@ -24,6 +24,7 @@ means the same tool call works in a minimal container and a full GPU image.
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 from typing import Literal
 
@@ -181,16 +182,17 @@ def _composite_over(rgba: Image.Image, background: tuple[int, int, int, int]) ->
 
 
 def ml_available() -> tuple[bool, str]:
-    """Whether ``rembg`` and an ONNX runtime are importable."""
-    try:
-        import rembg  # noqa: F401
-    except ImportError:
+    """Whether ``rembg`` and an ONNX runtime are installed, without importing them.
+
+    Importing ``onnxruntime-gpu`` in the server process can load CUDA libraries;
+    a module-spec check is enough for capability reporting and method='auto'.
+    Actual imports and session creation happen in the isolated worker.
+    """
+    if importlib.util.find_spec("rembg") is None:
         return False, "rembg is not installed (install the 'bg' extra)"
-    try:
-        import onnxruntime  # noqa: F401
-    except ImportError:
+    if importlib.util.find_spec("onnxruntime") is None:
         return False, "onnxruntime is not installed (install the 'bg' extra)"
-    return True, "rembg + onnxruntime available"
+    return True, "rembg + onnxruntime available (loaded on demand in isolated worker)"
 
 
 def remove_background_ml(
@@ -244,8 +246,22 @@ def remove_background(
     edge_connected: bool = True,
     model: str = "u2net",
     background: tuple[int, int, int, int] | None = None,
+    ml_remover=None,
 ) -> tuple[Image.Image, list[str]]:
-    """Dispatch to the requested background-removal implementation."""
+    """Dispatch to the requested background-removal implementation.
+
+    When supplied, ``ml_remover`` isolates ML inference from the server process
+    so an ONNX CUDA provider cannot keep a context resident while the server is
+    otherwise idle.
+    """
+
+    def run_ml():
+        return (
+            ml_remover(image, model=model, background=background)
+            if ml_remover is not None
+            else remove_background_ml(image, model=model, background=background)
+        )
+
     key = (method or "auto").strip().lower()
     if key == "color":
         return remove_background_color(
@@ -256,12 +272,12 @@ def remove_background(
             background=background,
         )
     if key == "ml":
-        return remove_background_ml(image, model=model, background=background)
+        return run_ml()
     if key == "auto":
         available, _ = ml_available()
         if available:
             try:
-                return remove_background_ml(image, model=model, background=background)
+                return run_ml()
             except BackendUnavailableError as exc:
                 logger.info("ML background removal unavailable, using colour keying: %s", exc)
         result, notes = remove_background_color(

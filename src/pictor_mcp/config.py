@@ -247,11 +247,14 @@ class Config:
     output_root: Path
     #: Strip EXIF/ICC/other metadata from outputs unless asked to keep it.
     strip_metadata: bool = True
-    #: GPU policy: ``auto`` uses a CUDA backend only when one is importable.
+    #: GPU policy for resize acceleration. CUDA is initialized lazily in an isolated worker.
     gpu: str = "auto"
     #: Only use the GPU above this pixel count (transfer overhead dominates
     #: for small images).
     gpu_min_pixels: int = 4_000_000
+    #: Shut down the isolated CUDA worker after this many idle seconds. Zero
+    #: means release the worker immediately after the active tool call.
+    gpu_idle_seconds: float = 300.0
     #: Embed the resulting image inline in tool results. Off by default: a
     #: base64 payload is large, it is repeated on every call, and the clients
     #: this server targets either render the markdown URL or discard the block
@@ -506,7 +509,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
 
     gpu = (e.raw("PICTOR_GPU", "auto") or "auto").lower()
     if gpu not in {"auto", "off", "torch", "cuda"}:
-        raise ConfigError(f"PICTOR_GPU must be one of auto, off, torch (got {gpu!r})")
+        raise ConfigError(f"PICTOR_GPU must be one of auto, off, torch, cuda (got {gpu!r})")
 
     log_level = (e.raw("PICTOR_LOG_LEVEL", "INFO") or "INFO").upper()
     if log_level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
@@ -538,6 +541,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         strip_metadata=e.bool("PICTOR_STRIP_METADATA", True),
         gpu=gpu,
         gpu_min_pixels=e.int("PICTOR_GPU_MIN_PIXELS", 4_000_000, minimum=0),
+        gpu_idle_seconds=float(e.int("PICTOR_GPU_IDLE_SECONDS", 300, minimum=0, maximum=86400)),
         inline_images=e.bool("PICTOR_INLINE_IMAGES", False),
         log_level=log_level,
         bg_model=e.raw("PICTOR_BG_MODEL", "u2net") or "u2net",

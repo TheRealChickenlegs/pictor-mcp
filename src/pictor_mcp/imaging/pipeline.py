@@ -205,6 +205,7 @@ def apply_operations(
     fonts: FontIndex,
     overlays: dict[str, Image.Image] | None = None,
     resampler_for=None,
+    ml_remover=None,
     deadline=None,
 ) -> PipelineOutcome:
     """Run ``operations`` in order, returning the transformed image.
@@ -238,6 +239,7 @@ def apply_operations(
                 fonts=fonts,
                 overlays=available_overlays,
                 resampler_for=resampler_for,
+                ml_remover=ml_remover,
                 notes=notes,
             )
         except PictorError as exc:
@@ -268,6 +270,7 @@ def _apply_one(
     fonts: FontIndex,
     overlays: dict[str, Image.Image],
     resampler_for,
+    ml_remover,
     notes: list[str],
 ) -> Image.Image:
     if isinstance(operation, AutoOrientOperation):
@@ -379,6 +382,7 @@ def _apply_one(
             edge_connected=operation.edge_connected,
             model=operation.model,
             background=operation.background,
+            ml_remover=ml_remover,
         )
         notes.extend(background_notes)
         return result

@@ -158,7 +158,7 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
             "Returns metadata only; nothing is decoded, so it is cheap to call first."
         ),
     )
-    @tool_guard
+    @tool_guard(ctx)
     async def image_list_inputs(
         pattern: Annotated[
             str | None,

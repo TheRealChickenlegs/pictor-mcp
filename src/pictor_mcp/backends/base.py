@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import Protocol, cast, runtime_checkable
 
 from PIL import Image
 
@@ -75,6 +75,7 @@ class BackendRegistry:
     min_pixels_for_gpu: int = 4_000_000
     #: Upper bound on what we are willing to move to the device at once.
     max_pixels_for_gpu: int = 64_000_000
+    gpu_worker: object | None = None
 
     def resampler_for(self, image: Image.Image):
         """Return a backend able to resize ``image`` now, or ``None`` for Pillow."""
@@ -94,19 +95,66 @@ class BackendRegistry:
         for backend in self.backends:
             try:
                 if backend.available():
-                    return f"{backend.name} ({backend.device})"
+                    if getattr(backend, "initialized", True):
+                        return f"{backend.name} ({backend.device})"
+                    return "pillow (cpu; CUDA worker is lazy and not using VRAM)"
             except Exception:  # pragma: no cover - defensive
                 logger.warning("backend %s failed its availability check", backend.name, exc_info=True)
                 continue
         return "pillow (cpu)"
 
+    def _lifecycle_backends(self) -> list[object]:
+        candidates = [*self.backends, *([self.gpu_worker] if self.gpu_worker else [])]
+        unique: list[object] = []
+        for backend in candidates:
+            if not any(existing is backend for existing in unique):
+                unique.append(backend)
+        return unique
+
+    def begin_tool_call(self) -> None:
+        for backend in self._lifecycle_backends():
+            callback = getattr(backend, "begin_tool_call", None)
+            if callable(callback):
+                callback()
+
+    def end_tool_call(self) -> None:
+        for backend in self._lifecycle_backends():
+            callback = getattr(backend, "end_tool_call", None)
+            if callable(callback):
+                callback()
+
+    def gpu_device_info(self) -> list[dict[str, object]]:
+        for backend in self._lifecycle_backends():
+            callback = getattr(backend, "gpu_device_info", None)
+            if callable(callback):
+                return cast(list[dict[str, object]], callback())
+        return []
+
+    def remove_background_ml(self, image: Image.Image, *, model: str, background=None):
+        callback = getattr(self.gpu_worker, "remove_background_ml", None)
+        if callable(callback):
+            return callback(image, model=model, background=background)
+        from ..imaging.background import remove_background_ml
+
+        return remove_background_ml(image, model=model, background=background)
+
     def to_public_dict(self) -> dict[str, object]:
-        return {
+        statuses = []
+        for backend in self._lifecycle_backends():
+            callback = getattr(backend, "status", None)
+            if callable(callback):
+                statuses.append(callback())
+        statuses.extend(status for status in self.statuses if status.name == "pillow")
+        report: dict[str, object] = {
             "active": self.active,
             "minPixelsForAcceleration": self.min_pixels_for_gpu,
             "maxPixelsForAcceleration": self.max_pixels_for_gpu,
-            "backends": [status.to_public_dict() for status in self.statuses],
+            "backends": [status.to_public_dict() for status in statuses],
         }
+        if self.gpu_worker is not None:
+            report["gpuWorkerIsolation"] = "separate process; terminated after idle timeout to release CUDA context"
+            report["gpuWorkerIdleSeconds"] = getattr(self.gpu_worker, "idle_seconds", None)
+        return report
 
 
 __all__ = ["BackendRegistry", "BackendStatus", "ResizeBackend"]

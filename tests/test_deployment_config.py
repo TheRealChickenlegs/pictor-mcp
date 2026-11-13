@@ -23,6 +23,7 @@ import pytest
 import yaml
 
 from pictor_mcp.config import Config, inert_allow_list_entries, load_config
+from pictor_mcp.errors import ConfigError
 
 try:  # Python 3.11+
     # `# novermin` is required: the version-floor check cannot see through the
@@ -356,6 +357,20 @@ class TestComposeConfiguration:
     def test_cpu_deployment_disables_the_gpu(self) -> None:
         """The CPU image has no torch, so asking for it only wastes startup time."""
         assert load_config(_env(BASE_COMPOSE)).gpu == "off"
+
+    def test_gpu_worker_idle_timeout_defaults_to_five_minutes(self) -> None:
+        config = load_config(_env(BASE_COMPOSE))
+        assert config.gpu_idle_seconds == 300
+
+    @pytest.mark.parametrize(("value", "expected"), [("0", 0), ("45", 45), ("3600", 3600)])
+    def test_gpu_worker_idle_timeout_is_configurable(self, value: str, expected: int) -> None:
+        config = _config(PICTOR_GPU_IDLE_SECONDS=value)
+        assert config.gpu_idle_seconds == expected
+
+    @pytest.mark.parametrize("value", ["-1", "86401", "not-a-number"])
+    def test_gpu_worker_idle_timeout_rejects_invalid_values(self, value: str) -> None:
+        with pytest.raises(ConfigError):
+            _config(PICTOR_GPU_IDLE_SECONDS=value)
 
     @pytest.mark.parametrize("overlay", [GPU_OVERLAY, ML_OVERLAY], ids=lambda p: p.name)
     def test_cuda_overlays_request_auto_detection(self, overlay: Path) -> None:

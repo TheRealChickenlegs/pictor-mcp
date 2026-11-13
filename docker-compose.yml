@@ -256,12 +256,16 @@ x-pictor-environment: &pictor-environment
   # Return the image inline in tool results so vision-capable clients can see
   # it. Costs context; turn off for text-only clients.
   PICTOR_INLINE_IMAGES: ${PICTOR_INLINE_IMAGES:-true}
-  # off | auto | torch. The CPU image has no torch, so `off` is correct here and
-  # avoids a pointless probe at startup.
+  # off | auto | torch. The CPU image has no torch, so `off` is correct here.
+  # This controls CUDA resize; ML background removal still routes through an
+  # isolated worker if the bg-gpu extra is installed. Auto initializes lazily.
   PICTOR_GPU: ${PICTOR_GPU:-off}
   # Images below this size stay on the CPU: the device transfer costs more than
   # the resize.
   PICTOR_GPU_MIN_PIXELS: ${PICTOR_GPU_MIN_PIXELS:-4000000}
+  # Worker process exits after this many seconds without any tool call, releasing
+  # its CUDA context and VRAM. Zero exits after the active call completes.
+  PICTOR_GPU_IDLE_SECONDS: ${PICTOR_GPU_IDLE_SECONDS:-300}
   # u2net | u2netp | isnet-general-use | silueta. Only u2net ships inside the ML
   # image; any other model needs its weights present under U2NET_HOME.
   PICTOR_BG_MODEL: ${PICTOR_BG_MODEL:-u2net}

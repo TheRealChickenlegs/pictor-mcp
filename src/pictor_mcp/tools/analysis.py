@@ -55,7 +55,7 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
             "transform or to spot duplicate images."
         ),
     )
-    @tool_guard
+    @tool_guard(ctx)
     async def image_compare(
         path: Annotated[str | None, Field(description="Path to the first image.")] = None,
         base64_data: Annotated[str | None, Field(description="Inline base64 for the first image.")] = None,
@@ -143,7 +143,7 @@ def register(server: MCPServer, ctx: ToolContext) -> None:
             "ready-to-paste srcset. This is the one call to use for 'make this web-ready'."
         ),
     )
-    @tool_guard
+    @tool_guard(ctx)
     async def image_optimize_web(
         path: Annotated[str | None, Field(description="Path to the source image.")] = None,
         base64_data: Annotated[str | None, Field(description="Inline base64 source image.")] = None,
