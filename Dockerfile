@@ -78,7 +78,7 @@
 # Nothing here depends on the project, so nothing here is invalidated by a code
 # change. Everything downstream inherits it, including all three variants.
 # =============================================================================
-FROM python:3.14-slim AS system
+FROM python:3.15-slim AS system
 
 LABEL org.opencontainers.image.title="pictor-mcp" \
       org.opencontainers.image.description="Secure MCP server for image operations: convert, resize, compress, crop, watermark, batch and more." \
